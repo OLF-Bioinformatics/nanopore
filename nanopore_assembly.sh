@@ -18,24 +18,24 @@ version="0.1"
 ######################
 
 
-#Analysis folder
+# Analysis folder
 export baseDir=""${HOME}"/analyses/lambda_nanopore"
 
-#reads
+# Reads
 export fast5="/media/3tb_hdd/data/lambda_nanopore/fast5"
 
-#Database to use for metagomic analysis of raw data (contamination)
+# Database to use for metagomic analysis of raw data (contamination)
 db="/media/3tb_hdd/db/centrifuge/p_compressed+h+v"
 # db="/media/3tb_hdd/db/centrifuge/nt"
 
-#program location
+# Program location
 export prog=""${HOME}"/prog/nanopolish/scripts"
 
-#Maximum number of cores used per sample for parallel processing
-#A highier value reduces the memory footprint.
+# Maximum number of cores used per sample for parallel processing
+# A highier value reduces the memory footprint.
 export maxProc=12
 
-#Assembly name
+# Assembly name
 prefix="lambda"
 
 
@@ -46,7 +46,7 @@ prefix="lambda"
 #######################
 
 
-#Folder structure
+# Folder structure
 logs=""${baseDir}"/logs"
 qc=""${baseDir}"/qc"
 export fastq=""${baseDir}"/fastq"
@@ -55,7 +55,7 @@ export polished=""${baseDir}"/polished"
 aligned=""${baseDir}"/aligned"
 
 
-#create folders if do not exist
+# Create folders if do not exist
 # "||" if test is false
 # "&&" if test is true
 [ -d "$baseDir" ] || mkdir -p "$baseDir"
@@ -74,7 +74,7 @@ aligned=""${baseDir}"/aligned"
 ######################
 
 
-#computer performance
+# Computer performance
 export cpu=$(nproc) #total number of cores
 mem=$(($(grep MemTotal /proc/meminfo | awk '{print $2}')*85/100000000)) #85% of total memory in GB
 
@@ -86,7 +86,7 @@ mem=$(($(grep MemTotal /proc/meminfo | awk '{print $2}')*85/100000000)) #85% of 
 ################
 
 
-#Date
+# Date
 echo -e "$(date)\n" | tee "${logs}"/log.txt
 echo -e "User: $(whoami)" | tee -a "${logs}"/log.txt
 echo -e "Processors: "$cpu"" | tee -a "${logs}"/log.txt
@@ -95,12 +95,94 @@ echo -e "Memory: "$mem"G" | tee -a "${logs}"/log.txt
 #script version
 echo -e "\nnanopore_assembly.sh version "$version"\n" | tee -a "${logs}"/log.txt  # $0
 
-#log software versions
-#poretools
+
+####################
+#                  #
+#   Dependencies   #
+#                  #
+####################
+
+
+# Check for dependencies and log versions
+
+# java
+if hash java 2>/dev/null; then 
+    java -version 2>&1 1>/dev/null | grep "java version" | tr -d '"' | tee -a "${logs}"/log.txt
+else
+    echo >&2 "java was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# poretools
 if hash poretools 2>/dev/null; then  # if installed
     poretools -v | tee -a "${logs}"/log.txt
 else
     echo >&2 "poretools was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# FastQC
+if hash fastqc 2>/dev/null; then 
+    fastqc -v | tee -a "${logs}"/log.txt
+else
+    echo >&2 "fastQC was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Centrifuge
+if hash centrifuge 2>/dev/null; then 
+    v=$(centrifuge --version | grep -F "version")
+    echo "centrifuge $v" | tee -a "${logs}"/log.txt
+else
+    echo >&2 "centrifuge was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Canu
+if hash canu 2>/dev/null; then
+    canu --version | tee -a "${logs}"/log.txt
+else
+    echo >&2 "canu was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# BWA
+if hash bwa 2>/dev/null; then
+    v=$(bwa 2>&1 1>/dev/null | grep -F "Version" | cut -d " " -f 2)
+    echo "bwa $v" | tee -a "${logs}"/log.txt
+else
+    echo >&2 "bwa was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Samtools
+if hash samtools 2>/dev/null; then
+    samtools --version | grep -F 'samtools' | tee -a "${logs}"/log.txt
+else
+    echo >&2 "samtools was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Nanopolish
+if hash nanopolish 2>/dev/null; then
+    echo "nanopolish v0.6" | tee -a "${logs}"/log.txt  # not version option with this software, yet
+else
+    echo >&2 "nanopolish was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+
+#check Centrifuge datase
+if [ -s "$db" ]; then
+    echo -e "\nCentrifuge database: $(basename "$db")" | tee -a "${logs}"/log.txt
+else
+    echo ""
+    exit 1
+fi
+
+# Check if reads folder has fast5 files
+if [ $(ls "$fast5" | wc -l) -eq 0 ]; then
+    echo "No .fast5 files are present in the provided data folder"
     exit 1
 fi
 
@@ -112,14 +194,14 @@ fi
 ##########
 
 
-#collector’s curve of the yield
+# Collector’s curve of the yield
 poretools yield_plot \
     --plot-type reads \
     --saveas "${qc}"/yield.png \
     --savedf "${qc}"/yield.tsv \
     "$fast5"
 
-#histogram of read sizes
+# Histogram of read sizes
 poretools hist \
     --saveas "${qc}"/sizes.png \
     "$fast5"
@@ -138,21 +220,20 @@ function Fast5_to_fastq()
     poretools fastq "$1" > "${fastq}"/"${name}".fastq
 }
 
-#make function available to parallel
+# Make function available to parallel
 export -f Fast5_to_fastq  # -f is to export functions
 
-
-#run trimming on multiple samples in parallel
+# Run in parallel
 find "$fast5" -type f -name "*.fast5" \
     | parallel  --env Fast5_to_fastq \
                 --env fastq \
                 --jobs "$maxProc" \
                 'Fast5_to_fastq {}'
 
-#merge all fastq into one file
+# Merge all fastq into one file
 cat "${fastq}"/*.fastq | pigz > "${fastq}"/all_reads.fastq.gz
 
-#delete unmerged fastq
+# Delete unmerged fastq
 for i in $(find "$fast5" -type f -name "*.fast5"); do
     name=$(basename "${i%.fast5}")
     rm -f "${fastq}"/"${name}".fastq
@@ -166,8 +247,10 @@ done
 ####################
 
 
+# Create folder to store report
 [ -d "${qc}"/fastqc/raw ] || mkdir -p "${qc}"/fastqc/raw
 
+# Run fastQC
 fastqc \
     --o  "${qc}"/fastqc/raw \
     --noextract \
@@ -182,10 +265,10 @@ fastqc \
 ######################
 
 
-#create folder
+# Create folder
 [ -d "${qc}"/centrifuge ] || mkdir -p "${qc}"/centrifuge
 
-#run centrifuge
+# Run centrifuge
 centrifuge \
     -p "$cpu" \
     -t \
@@ -196,15 +279,13 @@ centrifuge \
     > "${qc}"/centrifuge/"${prefix}".tsv
 
 
-#Prepare result for display with Krona
+# Prepare result for display with Krona
 cat "${qc}"/centrifuge/"${prefix}".tsv | \
     cut -f 1,3 | \
     ktImportTaxonomy /dev/stdin -o  "${qc}"/centrifuge/"${prefix}".html
 
-#visualize the resutls in Firefow browser
+# Visualize the resutls in Firefow browser
 firefox file://"${qc}"/centrifuge/"${prefix}".html &
-
-
 
 
 ########################
@@ -214,14 +295,14 @@ firefox file://"${qc}"/centrifuge/"${prefix}".html &
 ########################
 
 
-#canu
+# canu
 canu \
     -p "$prefix" \
     -d "$assemblies" \
     genomeSize=48.5k \
     -nanopore-raw "${fastq}"/all_reads.fastq.gz
 
-#polish assembly
+# Polish assembly
 
 #extrac reads in fasta
 #convert fastq to fasta
@@ -229,7 +310,7 @@ zcat "${fastq}"/all_reads.fastq.gz \
     | sed -n '1~4s/^@/>/p;2~4p' \
     > "${polished}"/reads.fasta
 
-#index draft genome
+# Index draft genome
 bwa index "${assemblies}"/"${prefix}".contigs.fasta
 # bwa index "${assemblies}"/"${prefix}".unassembled.fasta
 
@@ -239,7 +320,7 @@ bwa mem \
     -t "$scpu" \
     "${assemblies}"/"${prefix}".contigs.fasta \
     "${polished}"/reads.fasta | \
-samtools sort -o "${polished}"/reads.sorted.bam -
+    samtools sort -o "${polished}"/reads.sorted.bam -
 
 #index bam file
 samtools index "${polished}"/reads.sorted.bam
