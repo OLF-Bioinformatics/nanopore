@@ -19,24 +19,27 @@ version="0.1"
 
 
 # Analysis folder
-export baseDir=""${HOME}"/analyses/lambda_nanopore"
+export baseDir=""${HOME}"/analyses/salmonella_assembly_nanopore"
 
 # Reads
-export fast5="/media/3tb_hdd/data/lambda_nanopore/fast5"
+export fast5="/media/6tb_raid10/data/salmonella_lettuce_nanopore/20170818_salmonella/20170818_1442_DNA_DT104/fast5"
 
 # Database to use for metagomic analysis of raw data (contamination)
-db="/media/3tb_hdd/db/centrifuge/p_compressed+h+v"
-# db="/media/3tb_hdd/db/centrifuge/nt"
+# db="/media/6tb_raid10/db/centrifuge/p_compressed+h+v"
+db="/media/6tb_raid10/db/centrifuge/nt"
 
 # Program location
-export prog=""${HOME}"/prog/nanopolish/scripts"
+export prog=""${HOME}"/prog"
 
 # Maximum number of cores used per sample for parallel processing
 # A highier value reduces the memory footprint.
-export maxProc=12
+export maxProc=48
 
 # Assembly name
-prefix="lambda"
+export prefix="salmonella_assembly"
+
+# Estimated genome size in bp
+size=4850000
 
 
 #######################
@@ -77,6 +80,7 @@ aligned=""${baseDir}"/aligned"
 # Computer performance
 export cpu=$(nproc) #total number of cores
 mem=$(($(grep MemTotal /proc/meminfo | awk '{print $2}')*85/100000000)) #85% of total memory in GB
+memJava="-Xmx"$mem"g"
 
 
 ################
@@ -165,7 +169,8 @@ fi
 
 # Nanopolish
 if hash nanopolish 2>/dev/null; then
-    echo "nanopolish v0.6" | tee -a "${logs}"/log.txt  # not version option with this software, yet
+    version=$(nanopolish --version | head -n 1)
+    echo "$version" | tee -a "${logs}"/log.txt  # not version option with this software, yet
 else
     echo >&2 "nanopolish was not found. Aborting." | tee -a "${logs}"/log.txt
     exit 1
@@ -173,7 +178,7 @@ fi
 
 
 #check Centrifuge datase
-if [ -s "$db" ]; then
+if [ -s "${db}.1.cf" ]; then
     echo -e "\nCentrifuge database: $(basename "$db")" | tee -a "${logs}"/log.txt
 else
     echo ""
@@ -181,7 +186,7 @@ else
 fi
 
 # Check if reads folder has fast5 files
-if [ $(ls "$fast5" | wc -l) -eq 0 ]; then
+if [ $(find "$fast5" -type f -name "*.fast5" | wc -l) -eq 0 ]; then
     echo "No .fast5 files are present in the provided data folder"
     exit 1
 fi
@@ -199,45 +204,138 @@ poretools yield_plot \
     --plot-type reads \
     --saveas "${qc}"/yield.png \
     --savedf "${qc}"/yield.tsv \
-    "$fast5"
+    "$fast5/pass"
 
 # Histogram of read sizes
 poretools hist \
     --saveas "${qc}"/sizes.png \
-    "$fast5"
+    "$fast5/pass"
 
 
-#########################
-#                       #
-#   Converto to fastq   #
-#                       #
-#########################
+########################
+#                      #
+#   Convert to fastq   #
+#                      #
+########################
 
 
 function Fast5_to_fastq()
 {
     name=$(basename "${1%.fast5}")
     poretools fastq "$1" > "${fastq}"/"${name}".fastq
+    # poretools fastq "$1" | gzip > "${fastq}"/"${name}".fastq  # gzip iis OK to use beacause they are all very small files
+    # poretools fastq "$1" | pigz >> "${fastq}"/"${prefix}".fromfast5.fastq.gz  # seems to produce a corrupted fastq file
 }
 
 # Make function available to parallel
 export -f Fast5_to_fastq  # -f is to export functions
 
 # Run in parallel
-find "$fast5" -type f -name "*.fast5" \
-    | parallel  --env Fast5_to_fastq \
+# TODO -> Add log
+find "$fast5/pass" -type f -name "*.fast5" \
+    | parallel  --bar \
+                -k \
+                --env Fast5_to_fastq \
                 --env fastq \
+                --env prefix \
                 --jobs "$maxProc" \
                 'Fast5_to_fastq {}'
 
 # Merge all fastq into one file
-cat "${fastq}"/*.fastq | pigz > "${fastq}"/all_reads.fastq.gz
+# cat "${fastq}"/*.fastq | pigz > "${fastq}"/"${prefix}".fastq.gz # Does not work because too many files: bash: /bin/cat: Argument list too long
+find "$fastq" -type f -name "*.fastq" -exec cat {} + \
+    | pigz > "${fastq}"/"${prefix}".fastq.gz
 
 # Delete unmerged fastq
-for i in $(find "$fast5" -type f -name "*.fast5"); do
-    name=$(basename "${i%.fast5}")
-    rm -f "${fastq}"/"${name}".fastq
-done
+# rm -f "${fastq}"/*.fastq #bash: /bin/rm: Argument list too long
+find "$fastq" -type f -name "*.fastq" -exec rm {} +
+
+
+# # https://github.com/rrwick/Fast5-to-Fastq
+# # Aim for a 100x coverage (5MB x 100) -> not a good idea if metagenomic sample...
+# # 2000bp is longer that most repeats in bacteria.
+# ##--target_bases 500000000 \
+# python3 "${prog}"/Fast5-to-Fastq/fast5_to_fastq.py \
+#     --min_length 2000 \
+#     "$fast5/pass" \
+#     | pigz > "${fastq}"/"${prefix}".fastq.gz
+
+
+################
+#              #
+#   Trimming   #
+#              #
+################
+
+
+# Trim adapters
+porechop \
+    -i "${fastq}"/"${prefix}".fastq.gz \
+    -o "${fastq}"/"${prefix}"_t.fastq.gz \
+    --threads "$cpu" \
+    | tee -a "${logs}"/porechop.log  #check if that works
+
+##Check to add a log for porechop if not one already
+
+# Trim on quality
+#TODO
+
+
+# Discard reads < 1000bp  ##############NOT
+bbduk.sh "$memJava" \
+    threads="$cpu" \
+    in="${fastq}"/"${prefix}"_t.fastq.gz \
+    minavgquality=12 \
+    minlength=300 \
+    out="${fastq}"/"${prefix}"_trimmed.fastq.gz \
+    ziplevel=9
+
+
+###################
+#                 #
+#   Basecalling   #
+#                 #
+###################
+
+
+# Using nanonetcall
+# To check what the failed sequences look like
+
+# Select the class of read to call
+export read_class="skip"
+
+# The calling function
+function basecall()
+{
+    in_name=$(basename "$1")
+    out_name="${in_name%.fast5}.fastq"
+
+    nanonetcall \
+        --fastq \
+        "$1" \
+        > "${fast5}"/../fastq/"${read_class}"/"$out_name"
+
+    if [[ ! -s "${fast5}"/../fastq/"${read_class}"/"$out_name" ]]; then
+        rm "${fast5}"/../fastq/"${read_class}"/"$out_name"
+    fi
+}
+
+# Make function available to parallel
+export -f basecall
+
+[ -d "${fast5}"/../fastq/"${read_class}" ] || mkdir -p "${fast5}"/../fastq/"${read_class}"
+
+# On Failed reads
+find "${fast5}"/"${read_class}" -type f -name "*.fast5" |
+    parallel    --bar \
+                --env basecall \
+                --env fast5 \
+                'basecall {}'
+
+cat "${fast5}"/../fastq/"${read_class}"/*.fastq \
+    | pigz > "${fast5}"/../fastq/"${read_class}"/salmonella_lettuce_"${read_class}".fastq.gz
+
+rm "${fast5}"/../fastq/"${read_class}"/*.fastq
 
 
 ####################
@@ -248,14 +346,14 @@ done
 
 
 # Create folder to store report
-[ -d "${qc}"/fastqc/raw ] || mkdir -p "${qc}"/fastqc/raw
+[ -d "${qc}"/fastqc ] || mkdir -p "${qc}"/fastqc
 
 # Run fastQC
 fastqc \
-    --o  "${qc}"/fastqc/raw \
+    --o  "${qc}"/fastqc \
     --noextract \
     --threads "$cpu" \
-    "${fastq}"/all_reads.fastq.gz
+    "${fastq}"/"${prefix}"_trimmed.fastq.gz
 
 
 ######################
@@ -274,10 +372,9 @@ centrifuge \
     -t \
     --seed "$RANDOM" \
     -x "$db" \
-    -U "${fastq}"/all_reads.fastq.gz \
+    -U "${fastq}"/"${prefix}"_trimmed.fastq.gz \
     --report-file "${qc}"/centrifuge/"${prefix}"_report.tsv \
     > "${qc}"/centrifuge/"${prefix}".tsv
-
 
 # Prepare result for display with Krona
 cat "${qc}"/centrifuge/"${prefix}".tsv | \
@@ -299,14 +396,20 @@ firefox file://"${qc}"/centrifuge/"${prefix}".html &
 canu \
     -p "$prefix" \
     -d "$assemblies" \
-    genomeSize=48.5k \
-    -nanopore-raw "${fastq}"/all_reads.fastq.gz
+    genomeSize="$size" \
+    -nanopore-raw "${fastq}"/"${prefix}"_trimmed.fastq.gz
 
-# Polish assembly
+
+#################
+#               #
+#   Polishing   #
+#               #
+#################
+
 
 #extrac reads in fasta
 #convert fastq to fasta
-zcat "${fastq}"/all_reads.fastq.gz \
+zcat "${fastq}"/"${prefix}"_trimmed.fastq.gz \
     | sed -n '1~4s/^@/>/p;2~4p' \
     > "${polished}"/reads.fasta
 
@@ -317,17 +420,17 @@ bwa index "${assemblies}"/"${prefix}".contigs.fasta
 # Align the basecalled reads to the draft sequence
 bwa mem \
     -x ont2d \
-    -t "$scpu" \
+    -t "$cpu" \
     "${assemblies}"/"${prefix}".contigs.fasta \
     "${polished}"/reads.fasta | \
-    samtools sort -o "${polished}"/reads.sorted.bam -
+    samtools sort -@ "$cpu" -o "${polished}"/reads.sorted.bam -
 
 #index bam file
-samtools index "${polished}"/reads.sorted.bam
+samtools index -@ "$cpu" "${polished}"/reads.sorted.bam
 
 #run nanopolish
-python "${prog}"/nanopolish_makerange.py "${assemblies}"/"${prefix}".unassembled.fasta \
-    | parallel --results "${polished}"/nanopolish.results -P $((cpu/maxProc)) \
+python "${prog}"/nanopolish/scripts/nanopolish_makerange.py "${assemblies}"/"${prefix}".unassembled.fasta \
+    | parallel --results "${polished}"/nanopolish.results -j "$cpu" \
         nanopolish variants \
             --consensus "${polished}"/polished.{1}.fa \
             -w {1} \
@@ -338,7 +441,7 @@ python "${prog}"/nanopolish_makerange.py "${assemblies}"/"${prefix}".unassembled
             --min-candidate-frequency 0.1
 
 #merge individual segments
-python "${prog}"/nanopolish_merge.py \
+python "${prog}"/nanopolish/scripts/nanopolish_merge.py \
     "${polished}"/polished.*.fa \
     > "${polished}"/"${prefix}"_polished_genome.fasta
 
