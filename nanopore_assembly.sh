@@ -8,7 +8,7 @@
 
 
 #script version
-version="0.1"
+version="0.1.1"
 
 
 ######################
@@ -19,14 +19,14 @@ version="0.1"
 
 
 # Analysis folder
-export baseDir=""${HOME}"/analyses/salmonella_assembly_nanopore"
+export baseDir=""${HOME}"/analyses/YpD1_nanopore"
 
 # Reads
-export fast5="/media/6tb_raid10/data/salmonella_lettuce_nanopore/20170818_salmonella/20170818_1442_DNA_DT104/fast5"
+export fast5="/media/6tb_raid10/data/noriko/20170720_2026_YpD1_20JUL2017_NG/fast5"
 
 # Database to use for metagomic analysis of raw data (contamination)
-# db="/media/6tb_raid10/db/centrifuge/p_compressed+h+v"
-db="/media/6tb_raid10/db/centrifuge/nt"
+db="/media/6tb_raid10/db/centrifuge/2017-10-12_bact_vir_h"
+# db="/media/6tb_raid10/db/centrifuge/nt"
 
 # Program location
 export prog=""${HOME}"/prog"
@@ -36,10 +36,23 @@ export prog=""${HOME}"/prog"
 export maxProc=48
 
 # Assembly name
-export prefix="salmonella_assembly"
+export prefix="YpD1"
 
 # Estimated genome size in bp
-size=4850000
+size=4600000
+
+
+######################
+#                    #
+#     Resources      #
+#                    #
+######################
+
+
+# Computer performance
+export cpu=$(nproc) #total number of cores
+mem=$(($(grep MemTotal /proc/meminfo | awk '{print $2}')*85/100000000)) #85% of total memory in GB
+memJava="-Xmx"$mem"g"
 
 
 #######################
@@ -53,6 +66,7 @@ size=4850000
 logs=""${baseDir}"/logs"
 qc=""${baseDir}"/qc"
 export fastq=""${baseDir}"/fastq"
+basecalled=""${baseDir}"/basecalled"
 assemblies=""${baseDir}"/assemblies"
 export polished=""${baseDir}"/polished"
 aligned=""${baseDir}"/aligned"
@@ -68,19 +82,6 @@ aligned=""${baseDir}"/aligned"
 [ -d "$assemblies" ] || mkdir -p "$assemblies"
 [ -d "$polished" ] || mkdir -p "$polished"
 [ -d "$aligned" ] || mkdir -p "$aligned"
-
-
-######################
-#                    #
-#     Resources      #
-#                    #
-######################
-
-
-# Computer performance
-export cpu=$(nproc) #total number of cores
-mem=$(($(grep MemTotal /proc/meminfo | awk '{print $2}')*85/100000000)) #85% of total memory in GB
-memJava="-Xmx"$mem"g"
 
 
 ################
@@ -119,7 +120,7 @@ fi
 
 # poretools
 if hash poretools 2>/dev/null; then  # if installed
-    poretools -v | tee -a "${logs}"/log.txt
+    poretools -v 2>&1 1>/dev/null | tee -a "${logs}"/log.txt
 else
     echo >&2 "poretools was not found. Aborting." | tee -a "${logs}"/log.txt
     exit 1
@@ -273,22 +274,17 @@ porechop \
     -i "${fastq}"/"${prefix}".fastq.gz \
     -o "${fastq}"/"${prefix}"_t.fastq.gz \
     --threads "$cpu" \
-    | tee -a "${logs}"/porechop.log  #check if that works
-
-##Check to add a log for porechop if not one already
-
-# Trim on quality
-#TODO
-
+    | tee -a "${logs}"/"${prefix}"_porechop.log
 
 # Discard reads < 1000bp  ##############NOT
 bbduk.sh "$memJava" \
     threads="$cpu" \
     in="${fastq}"/"${prefix}"_t.fastq.gz \
     minavgquality=12 \
-    minlength=300 \
+    minlength=1000 \
     out="${fastq}"/"${prefix}"_trimmed.fastq.gz \
-    ziplevel=9
+    ziplevel=9 \
+    2> >(tee -a "${logs}"/"${prefix}"_bbduk.txt)
 
 
 ###################
@@ -302,7 +298,9 @@ bbduk.sh "$memJava" \
 # To check what the failed sequences look like
 
 # Select the class of read to call
-export read_class="skip"
+export read_class="pass"
+# export read_class="fail"
+# export read_class="skip"
 
 # The calling function
 function basecall()
@@ -346,11 +344,18 @@ rm "${fast5}"/../fastq/"${read_class}"/*.fastq
 
 
 # Create folder to store report
-[ -d "${qc}"/fastqc ] || mkdir -p "${qc}"/fastqc
+[ -d "${qc}"/fastqc/raw ] || mkdir -p "${qc}"/fastqc/raw
+[ -d "${qc}"/fastqc/trimmed ] || mkdir -p "${qc}"/fastqc/trimmed
 
 # Run fastQC
 fastqc \
-    --o  "${qc}"/fastqc \
+    --o  "${qc}"/fastqc/raw \
+    --noextract \
+    --threads "$cpu" \
+    "${fastq}"/"${prefix}".fastq.gz
+
+fastqc \
+    --o  "${qc}"/fastqc/trimmed \
     --noextract \
     --threads "$cpu" \
     "${fastq}"/"${prefix}"_trimmed.fastq.gz
@@ -393,11 +398,31 @@ firefox file://"${qc}"/centrifuge/"${prefix}".html &
 
 
 # canu
-canu \
-    -p "$prefix" \
-    -d "$assemblies" \
-    genomeSize="$size" \
-    -nanopore-raw "${fastq}"/"${prefix}"_trimmed.fastq.gz
+# canu \
+#     -p "$prefix" \
+#     -d "$assemblies" \
+#     genomeSize="$size" \
+#     -nanopore-raw "${fastq}"/"${prefix}"_trimmed.fastq.gz
+
+# Assemble
+for i in $(find "$fastq" -type f -name "*.fastq.gz"); do
+    sample=$(cut -d "_" -f 1 <<< $(basename "$i"))
+    
+    unicycler \
+        -l "$i" \
+        -o $"{assemblies}"/unicycler/"$sample" \
+        -t "$cpu" \
+        --verbosity 2 \
+        --mode normal
+
+    mv "${assemblies}"/unicycler/"${sample}"/assembly.fasta \
+        "${assemblies}"/unicycler/"${sample}"/"${sample}".fasta
+
+    circlator fixstart \
+        --verbose \
+        "${assemblies}"/unicycler/"${sample}"/"${sample}".fasta \
+        "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered
+done
 
 
 #################
@@ -407,43 +432,67 @@ canu \
 #################
 
 
-#extrac reads in fasta
-#convert fastq to fasta
-zcat "${fastq}"/"${prefix}"_trimmed.fastq.gz \
-    | sed -n '1~4s/^@/>/p;2~4p' \
-    > "${polished}"/reads.fasta
+# Polish
+for i in $(find "$fastq" -type f -name "*.fastq.gz"); do
+    sample=$(cut -d "_" -f 1 <<< $(basename "$i"))
 
-# Index draft genome
-bwa index "${assemblies}"/"${prefix}".contigs.fasta
-# bwa index "${assemblies}"/"${prefix}".unassembled.fasta
+    [ -d "${polished}"/"$sample" ] || mkdir -p "${polished}"/"$sample"
 
-# Align the basecalled reads to the draft sequence
-bwa mem \
-    -x ont2d \
-    -t "$cpu" \
-    "${assemblies}"/"${prefix}".contigs.fasta \
-    "${polished}"/reads.fasta | \
-    samtools sort -@ "$cpu" -o "${polished}"/reads.sorted.bam -
+    # Convert fastq to fasta
+    zcat "$i" \
+        | sed -n '1~4s/^@/>/p;2~4p' \
+        > "${polished}"/"${sample}"/"${sample}".fasta
 
-#index bam file
-samtools index -@ "$cpu" "${polished}"/reads.sorted.bam
+    # Index draft genome
+    bwa index \
+        "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta
 
-#run nanopolish
-python "${prog}"/nanopolish/scripts/nanopolish_makerange.py "${assemblies}"/"${prefix}".unassembled.fasta \
-    | parallel --results "${polished}"/nanopolish.results -j "$cpu" \
-        nanopolish variants \
-            --consensus "${polished}"/polished.{1}.fa \
-            -w {1} \
-            -r "${polished}"/reads.fasta \
-            -b "${polished}"/reads.sorted.bam \
-            -g "${assemblies}"/"${prefix}".unassembled.fasta \
-            -t $((cpu/maxProc)) \
-            --min-candidate-frequency 0.1
+    # Align the basecalled reads to the draft sequence
+    # bwa mem \
+    #     -x ont2d \
+    #     -t "$cpu" \
+    #     "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta \
+    #     "${polished}"/"${sample}"/"${sample}".fasta | \
+    #     samtools sort -@ "$cpu" -o "${polished}"/"${sample}"/"${sample}".bam -
 
-#merge individual segments
-python "${prog}"/nanopolish/scripts/nanopolish_merge.py \
-    "${polished}"/polished.*.fa \
-    > "${polished}"/"${prefix}"_polished_genome.fasta
+    minimap2 \
+        -ax map-ont \
+        -t "$cpu" \
+        "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta \
+        "${polished}"/"${sample}"/"${sample}".fasta | \
+    samtools sort -@ "$cpu" -o "${polished}"/"${sample}"/"${sample}".bam -
 
-#Cleanup
-rm -f "${polished}"/polished.*.fa
+    # Index bam file
+    samtools index -@ "$cpu" "${polished}"/"${sample}"/"${sample}".bam
+
+    # Index reads for nanopolish
+    nanopolish index \
+        -d /media/6tb_raid10/data/salmonella_human_birds/nanopore/20180503_1623_Wild_Bird_8samples_2018-05-03/fast5 \
+        -s "${basecalled}"/sequencing_summary.txt \
+        "${polished}"/"${sample}"/"${sample}".fasta
+
+    #run nanopolish
+    python /home/bioinfo/prog/nanopolish/scripts/nanopolish_makerange.py \
+        "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta \
+        | parallel --results "${polished}"/"${sample}"/nanopolish.results -j "$cpu" \
+            nanopolish variants \
+                --consensus "${polished}"/"${sample}"/"${sample}"_nanopolished.{1}.fa \
+                -w {1} \
+                -r "${polished}"/"${sample}"/"${sample}".fasta \
+                -b "${polished}"/"${sample}"/"${sample}".bam \
+                -g "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta \
+                -t 1 \
+                --min-candidate-frequency 0.1 \
+                -q dcm,dam \
+                --fix-homopolymers
+
+    #merge individual segments
+    python  /home/bioinfo/prog/nanopolish/scripts/nanopolish_merge.py \
+        "${polished}"/"${sample}"/"${sample}"_nanopolished.*.fa \
+        > "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta
+
+    #Cleanup
+    find "${polished}"/"$sample" -type f ! -name "*_nanopolished.fasta" -exec rm -rf {} \;
+    rm -rf "${polished}"/"${sample}"/nanopolish.results
+done
+
