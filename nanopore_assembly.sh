@@ -45,6 +45,14 @@ export size=5000000
 # Set smallest contig size for assemblies
 export smallest_contig=1000
 
+#Annotation
+export kingdom="Bacteria"
+export genus="Salmonella"
+export species="enterica"
+export gram="neg"
+export locus_tag="TOCHANGE"
+export centre="OLF"
+
 
 ######################
 #                    #
@@ -73,7 +81,9 @@ export fastq=""${baseDir}"/fastq"
 basecalled=""${baseDir}"/basecalled"
 export assemblies=""${baseDir}"/assemblies"
 export polished=""${baseDir}"/polished"
-aligned=""${baseDir}"/aligned"
+export annotation=""${baseDir}"/annotation"
+export phaster=""${baseDir}"/phaster"
+export amr=""${baseDir}"/amr"
 
 
 # Create folders if do not exist
@@ -85,7 +95,9 @@ aligned=""${baseDir}"/aligned"
 [ -d "$fastq" ] || mkdir -p "$fastq"
 [ -d "$assemblies" ] || mkdir -p "$assemblies"
 [ -d "$polished" ] || mkdir -p "$polished"
-[ -d "$aligned" ] || mkdir -p "$aligned"
+[ -d "$annotation" ] || mkdir -p "$annotation"
+[ -d "$phaster" ] || mkdir -p "$phaster"
+[ -d "$amr" ] || mkdir -p "$amr"
 
 
 ################
@@ -561,8 +573,8 @@ parallel    --bar \
             --jobs "$maxProc"
             "run_qualimap {}"
 
-# Blast genomes on nr
 
+# Blast genomes on nr
 function blast()
 {
     sample=$(cut -d "_" -f 1 <<< $(basename "${1%.fasta}"))
@@ -570,26 +582,29 @@ function blast()
     [ -d "${qc}"/blast/"$sample" ] || mkdir -p "${qc}"/blast/"$sample"
 
     blastn \
-        -task megablast \
         -db nt \
         -query "$1" \
         -out "${qc}"/blast/"${sample}"/"${sample}".blastn.all.tsv \
         -evalue "1e-10" \
         -outfmt '6 qseqid sseqid stitle pident length mismatch gapopen qstart qend sstart send evalue bitscore sscinames sskingdoms staxids' \
         -num_threads $((cpu/maxProc)) \
-        -culling_limit 5
+        -max_target_seqs 20
 
     # Add header
     echo -e "qseqid\tsseqid\tstitle\tpident\tlength\tmismatch\tgapopen\tqstart\tqend\tsstart\tsend\tevalue\tbitscore\tsscinames\tsskingdoms\tstaxids" \
         > "${qc}"/blast/"${sample}"/"${sample}".blastn.all.tsv.tmp
 
+    # Sort hits
     cat "${qc}"/blast/"${sample}"/"${sample}".blastn.all.tsv \
+        | sed '1d' \
+        | sort -t $'\t' -k1,1g -k13,13gr \
         >> "${qc}"/blast/"${sample}"/"${sample}".blastn.all.tsv.tmp
 
+    # Replace original file
     mv "${qc}"/blast/"${sample}"/"${sample}".blastn.all.tsv.tmp \
         "${qc}"/blast/"${sample}"/"${sample}".blastn.all.tsv
 
-    # Best hit only
+    # Best hits only
     echo -e "qseqid\tsseqid\tstitle\tpident\tlength\tmismatch\tgapopen\tqstart\tqend\tsstart\tsend\tevalue\tbitscore\tsscinames\tsskingdoms\tstaxids" \
         > "${qc}"/blast/"${sample}"/"${sample}".blastn.bestHit.tsv.tmp
 
@@ -603,19 +618,26 @@ function blast()
         "${qc}"/blast/"${sample}"/"${sample}".blastn.bestHit.tsv
 }
 
-export -f blast
+# export -f blast
 
-find "$polished" -type f -name "*_nanopolished.fasta" \
-    | parallel  --bar \
-                --env blast \
-                --env cpu \
-                --env maxProc \
-                --env qc \
-                --jobs "$maxProc" \
-                "blast {}"
+# find "$polished" -type f -name "*_nanopolished.fasta" \
+#     | parallel  --bar \
+#                 --env blast \
+#                 --env cpu \
+#                 --env maxProc \
+#                 --env qc \
+#                 --jobs "$maxProc" \
+#                 "blast {}"
 
-#clean blast index files
-find "$ordered" -type f ! -name "*.fasta" -exec rm {} \;
+# It's faster to run the blast on long contigs with all cores one sample at the time
+# than to parallel blast the samples with fewer cores, at least for nt
+c=0
+n=$(find "$polished" -type f -name "*_nanopolished.fasta" | wc -l)
+for i in $(find "$polished" -type f -name "*_nanopolished.fasta"); do
+    let c+=1
+    echo -ne "Blasting assembly "${c}"/"${n}" \\r"
+    blast "$i"
+done
 
 
 ### QUAST ###
@@ -664,3 +686,159 @@ find "$polished" -type f -name "*_nanopolished.fasta" \
                 "run_quast {}"
 
 source deactivate
+
+
+###################
+#                 #
+#   Annotation    #
+#                 #
+###################
+
+
+function annotate()
+{
+    sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+
+    #Prokka
+    prokka  --outdir "${annotation}"/"$sample" \
+            --force \
+            --prefix "$sample" \
+            --kingdom "$kingdom" \
+            --genus "$genus" \
+            --species "$species" \
+            --strain "$sample" \
+            --gram "$gram" \
+            --locustag "$locustag" \
+            --compliant \
+            --centre "$centre" \
+            --cpus $((cpu/maxProc)) \
+            --rfam \
+            "$1"
+
+    #extract hypothetical proteins
+    cat "${annotation}"/"${sample}"/"${sample}".faa | \
+        awk '{if(substr($0,1,1)==">"){if (p){print "\n";} print $0} else printf("%s",$0);p++;}END{print "\n"}' | \
+        grep --no-group-separator -A 1 -F "hypothetical protein" \
+        > "${annotation}"/"${sample}"/"${sample}"_hypoth.faa
+
+    echo -e ""$sample" hypothetical proteins (round1): $(cat "${annotation}"/"${sample}"/"${sample}".faa | grep -ic "hypothetical")" \
+        | tee -a "${logs}"/log.txt
+}
+
+export -f annotate
+
+find "$polished" -type f -name "*_nanopolished.fasta" | \
+    parallel    --bar \
+                --env annotate \
+                --env annotation \
+                --env kingdom \
+                --env genus \
+                --env species \
+                --env gram \
+                --env locustag \
+                --env centre \
+                --env cpu \
+                --env maxProc \
+                --env scripts \
+                --jobs "$maxProc" \
+                "annotate {}"
+
+
+### Resfinder
+
+function run_resfinder ()
+{
+    sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+
+    [ -d "${amr}"/"${sample}"/"$resfinder_db" ] || mkdir -p "${amr}"/"${sample}"/"$resfinder_db"
+
+    perl "${prog}"/resfinder/resfinder.pl \
+        -d "${prog}"/resfinder/resfinder_db/ \
+        -a "$resfinder_db" \
+        -i "$1" \
+        -o "${amr}"/"$sample"/"$resfinder_db" \
+        -k 90 \
+        -l 60
+}
+
+export -f run_resfinder
+
+for h in $(find "${prog}"/resfinder/resfinder_db -type f -name "*.fsa"); do
+    export resfinder_db=$(sed 's/\.fsa//' <<< $(basename "$h"))
+
+    find "$polished" -type f -name "*_nanopolished.fasta" | \
+        parallel --env run_resfinder \
+            --env resfinder_db \
+            "run_resfinder {}"
+done
+
+#Check if any hit
+find "${amr}" -type f -name "results_tab.txt" \
+    -exec cat {} \; | sed -n '1d' | tee "${amr}"/resfinder_hits.txt
+
+
+### Phaster
+
+#trim assemblies
+function phaster_trim()
+{
+    sample=$(cut -d '_' -f 1 <<< $(basename "$1"))
+
+    # http://phaster.ca/instructions
+    if [ $(cat "$1" | grep -Ec "^>") -gt 1 ]; then  # if more than one contig
+        #remove contigs smaller than 2000 bp from assembly
+        perl "${prog}"/phage_typing/removesmallscontigs.pl \
+            2000 \
+            "$1" \
+            > "${phaster}"/assemblies/"${sample}"_trimmed2000.fasta
+    elif [ $(cat "$1" | grep -Ec "^>") -eq 1 ]; then  # if only one contig
+        #remove contigs smaller than 2000 bp from assembly
+        perl "${prog}"/phage_typing/removesmallscontigs.pl \
+            1500 \
+            "$1" \
+            > "${phaster}"/assemblies/"${sample}"_trimmed1500.fasta
+    else
+        echo "No assembly for "$sample""  # Should not get here!
+        # exit 1
+    fi
+}
+
+#make function available to parallel
+export -f phaster_trim  # -f is to export functions
+
+ # To store trimmed assemblies for phaster submission
+[ -d "${phaster}"/assemblies ] || mkdir -p "${phaster}"/assemblies 
+
+#run trimming on multiple assemblies in parallel
+find "$polished" -type f -name "*_nanopolished.fasta" \
+    | parallel  --bar \
+                --env phaster_trim \
+                --env prog \
+                'phaster_trim {}'
+
+
+function phasterSubmit ()
+{
+    sample=$(basename "$1" | cut -d '_' -f 1)
+
+    # {"job_id":"ZZ_7aed0446a6","status":"You're next!..."}
+    wget --post-file="$i" \
+        http://phaster.ca/phaster_api?contigs=1 \
+        -O "${phaster}"/"${sample}".json \
+        -o "${phaster}"/"${sample}"_wget.log
+}
+
+# Submit to phaster sequencially
+c=0
+n=$(find "${phaster}"/assemblies -type f -name "*.fasta" | wc -l)
+for i in $(find "${phaster}"/assemblies -type f -name "*.fasta"); do
+    sample=$(cut -d "_" -f 1 <<< $(basename "$i"))
+
+    let c+=1
+    echo -ne "Submitting assembly of sample \""${sample}"\" to PHASTER server ("${c}"/"${n}") \\r"
+
+    phasterSubmit "$i"
+done
+
+# Get phaster results
+python3 ~/scripts/checkPhasterServer.py -f "$phaster"
