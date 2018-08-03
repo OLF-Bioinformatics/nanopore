@@ -8,7 +8,7 @@
 
 
 #script version
-version="0.2.0"
+version="0.2.0.1"
 
 
 ######################
@@ -316,10 +316,17 @@ for i in $(find "$fastq" -type f -name "*.fastq.gz"); do
     sample=$(cut -d "_" -f 1 <<< $(basename "$i"))
     
     # canu \
-    #     -p "$prefix" \
-    #     -d "$assemblies" \
+    #     -p "$sample" \
+    #     -d "${assemblies}"/canu/"$sample" \
     #     genomeSize="$size" \
-    #     -nanopore-raw "${fastq}"/"${prefix}"_trimmed.fastq.gz
+    #     -nanopore-raw "${fastq}"/"${sample}"_trimmed.fastq.gz
+
+    # flye \
+    #     --nano-raw "$i" \
+    #     --out-dir "${assemblies}"/flye/"$sample" \
+    #     --genome-size "$size" \
+    #     --iterations 3 \
+    #     --threads "$cpu"
 
     unicycler \
         -l "$i" \
@@ -549,6 +556,8 @@ function run_qualimap()
     [ -d "${qc}"/coverage/qualimap/"$sample" ] || mkdir -p "${qc}"/coverage/qualimap/"$sample"
 
     qualimap bamqc \
+        --paint-chromosome-limits \
+        --output-genome-coverage "${qc}"/coverage/qualimap/"$sample"_coverage \
         -bam "$1" \
         --java-mem-size="${mem}"g \
         -nt $((cpu/maxProc)) \
@@ -823,9 +832,15 @@ function phasterSubmit ()
 
     # {"job_id":"ZZ_7aed0446a6","status":"You're next!..."}
     wget --post-file="$i" \
-        http://phaster.ca/phaster_api?contigs=1 \
+        "http://phaster.ca/phaster_api?contigs=1" \
         -O "${phaster}"/"${sample}".json \
         -o "${phaster}"/"${sample}"_wget.log
+    # curl --progress-bar \
+    #     --user "<CFIA/duceppem>" \
+    #     --header "Content-Type: text/fasta" \
+    #     --request POST \
+    #     --data @"${i}" \
+    #     http://phaster.ca/phaster_api?contigs=1
 }
 
 # Submit to phaster sequencially
@@ -838,7 +853,8 @@ for i in $(find "${phaster}"/assemblies -type f -name "*.fasta"); do
     echo -ne "Submitting assembly of sample \""${sample}"\" to PHASTER server ("${c}"/"${n}") \\r"
 
     phasterSubmit "$i"
+    sleep 10
 done
 
 # Get phaster results
-python3 ~/scripts/checkPhasterServer.py -f "$phaster"
+python3 ~/scripts/checkPhasterServer.py --check -i "$phaster"
