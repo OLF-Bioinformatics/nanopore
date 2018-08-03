@@ -8,7 +8,7 @@
 
 
 #script version
-version="0.2.0.1"
+version="0.2.1"
 
 
 ######################
@@ -78,7 +78,7 @@ memJava="-Xmx"$mem"g"
 export logs=""${baseDir}"/logs"
 export qc=""${baseDir}"/qc"
 export fastq=""${baseDir}"/fastq"
-basecalled=""${baseDir}"/basecalled"
+export basecalled=""${baseDir}"/basecalled"
 export assemblies=""${baseDir}"/assemblies"
 export polished=""${baseDir}"/polished"
 export annotation=""${baseDir}"/annotation"
@@ -441,6 +441,7 @@ parallel    --bar \
             --env qc \
             --env polished \
             --env assemblies \
+            --env basecalled \
             --env prog \
             --env cpu \
             --env maxProc \
@@ -826,35 +827,31 @@ find "$polished" -type f -name "*_nanopolished.fasta" \
                 'phaster_trim {}'
 
 
-function phasterSubmit ()
-{
-    sample=$(basename "$1" | cut -d '_' -f 1)
+# function phasterSubmit ()
+# {
+#     sample=$(basename "$1" | cut -d '_' -f 1)
 
-    # {"job_id":"ZZ_7aed0446a6","status":"You're next!..."}
-    wget --post-file="$i" \
-        "http://phaster.ca/phaster_api?contigs=1" \
-        -O "${phaster}"/"${sample}".json \
-        -o "${phaster}"/"${sample}"_wget.log
-    # curl --progress-bar \
-    #     --user "<CFIA/duceppem>" \
-    #     --header "Content-Type: text/fasta" \
-    #     --request POST \
-    #     --data @"${i}" \
-    #     http://phaster.ca/phaster_api?contigs=1
-}
+#     # {"job_id":"ZZ_7aed0446a6","status":"You're next!..."}
+#     wget --post-file="$i" \
+#         "http://phaster.ca/phaster_api?contigs=1" \
+#         -O "${phaster}"/"${sample}".json \
+#         -o "${phaster}"/"${sample}"_wget.log
+# }
 
-# Submit to phaster sequencially
-c=0
-n=$(find "${phaster}"/assemblies -type f -name "*.fasta" | wc -l)
-for i in $(find "${phaster}"/assemblies -type f -name "*.fasta"); do
-    sample=$(cut -d "_" -f 1 <<< $(basename "$i"))
+# # Submit to phaster sequencially
+# c=0
+# n=$(find "${phaster}"/assemblies -type f -name "*.fasta" | wc -l)
+# for i in $(find "${phaster}"/assemblies -type f -name "*.fasta"); do
+#     sample=$(cut -d "_" -f 1 <<< $(basename "$i"))
 
-    let c+=1
-    echo -ne "Submitting assembly of sample \""${sample}"\" to PHASTER server ("${c}"/"${n}") \\r"
+#     let c+=1
+#     echo -ne "Submitting assembly of sample \""${sample}"\" to PHASTER server ("${c}"/"${n}") \\r"
 
-    phasterSubmit "$i"
-    sleep 10
-done
+#     phasterSubmit "$i"
+#     sleep 10
+# done
 
 # Get phaster results
-python3 ~/scripts/checkPhasterServer.py --check -i "$phaster"
+python3 ~/scripts/checkPhasterServer.py --submit --check \
+    -i "${phaster}"/assemblies \
+    -o "$phaster"
