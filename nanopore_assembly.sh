@@ -8,7 +8,7 @@
 
 
 #script version
-version="0.2.1"
+version="0.2.2"
 
 
 ######################
@@ -37,7 +37,7 @@ export scripts=""${HOME}"/scripts"
 export maxProc=8
 
 # Assembly name
-export prefix="YpD1"
+export sample="YpD1"
 
 # Estimated genome size in bp
 export size=5000000
@@ -78,6 +78,8 @@ memJava="-Xmx"$mem"g"
 export logs=""${baseDir}"/logs"
 export qc=""${baseDir}"/qc"
 export fastq=""${baseDir}"/fastq"
+export trimmed=""${baseDir}"/trimmed"
+export filtered=""${baseDir}"/filtered"
 export basecalled=""${baseDir}"/basecalled"
 export assemblies=""${baseDir}"/assemblies"
 export polished=""${baseDir}"/polished"
@@ -93,6 +95,8 @@ export amr=""${baseDir}"/amr"
 [ -d "$logs" ] || mkdir -p "$logs"
 [ -d "$qc" ] || mkdir -p "$qc"
 [ -d "$fastq" ] || mkdir -p "$fastq"
+[ -d "$trimmed" ] || mkdir -p "$trimmed"
+[ -d "$filtered" ] || mkdir -p "$filtered"
 [ -d "$assemblies" ] || mkdir -p "$assemblies"
 [ -d "$polished" ] || mkdir -p "$polished"
 [ -d "$annotation" ] || mkdir -p "$annotation"
@@ -210,7 +214,60 @@ fi
 ###################
 
 
-#Use albacore
+# Use albacore
+
+function call_bases_1D()
+{
+    # Will not do basecalling on ".fast5.tmp" files. They need to be renamed
+
+    kit="$1"  # "SQK-LSK108"
+    flow="$2"  # "FLO-MIN106"
+    fast5_folder="$3"  # top folder - will look recursively for fast5 files because "-r" option
+    fastq_folder="$4"
+    barcoded="$5"
+
+    if [[ "$barcoded" == "barcoded" ]]; then
+        read_fast5_basecaller.py \
+            -i "$fast5_folder" \
+            --barcoding \
+            -t "$cpu" \
+            -s "$fastq_folder" \
+            -k "$kit" \
+            -f "$flow" \
+            -r \
+            -o "fastq" \
+            -q 0 \
+            --disable_pings
+    else
+        read_fast5_basecaller.py \
+            -i "$fast5_folder" \
+            -t "$cpu" \
+            -s "$fastq_folder" \
+            -k "$kit" \
+            -f "$flow" \
+            -r \
+            -o "fastq" \
+            -q 0 \
+            --disable_pings
+
+        #files of most interest are found in "${fastq_folder}"/workplace/pass
+    fi
+}
+
+export -f call_bases_1D
+
+# Use max 12 threads max per instance for Albacore
+bins=$((cpu/12))  # 4
+[ "$bins" -eq 0 ] && bins=1  # in case computer has less than 12 cores
+folder_count=$(find "$fast5" -mindepth 1 -type d | wc -l)
+folder_per_bin=$(((folder_count/bins)+1))  # the "+1" make sure we never have more than 4 batches.
+find "$fast5" -mindepth 1 -type d | parallel -n "$folder_per_bin" 'mkdir batch{#} && mv {} {//}/batch{#}'
+
+find "$fast5" -mindepth 1 -maxdepth 1 -type d | \
+    parallel --dryrun call_bases_1D "SQK-LSK108" "FLO-MIN106" {} "${basecalled}"/{/}
+
+#Merge baecalling results
+find "$basecalled" -type f -name "*/pass/*.fastq.gz" -exec cat {} > "${basecalled}"/pass_all.fastq.gz
 
 
 ##########
@@ -220,7 +277,11 @@ fi
 ##########
 
 
-# NanoPlot
+# NanoPlot on "sequence_summary.txt" file
+
+
+
+# nanoQC on fastq file
 
 
 
@@ -232,54 +293,141 @@ fi
 
 
 # Trim adapters
-porechop \
-    -i "${fastq}"/"${prefix}".fastq.gz \
-    -o "${fastq}"/"${prefix}"_t.fastq.gz \
-    --threads "$cpu" \
-    | tee -a "${logs}"/"${prefix}"_porechop.log
+function trim()
+{
+    sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
 
-# Discard reads < 1000bp  ##############NOT
-# Diecard reads with min average quality below 12
-bbduk.sh "$memJava" \
-    threads="$cpu" \
-    in="${fastq}"/"${prefix}"_t.fastq.gz \
-    minavgquality=12 \
-    minlength=1000 \
-    out="${fastq}"/"${prefix}"_trimmed.fastq.gz \
-    ziplevel=9 \
-    2> >(tee -a "${logs}"/"${prefix}"_bbduk.txt)
+    porechop \
+        -i "$1" \
+        -o "${trimmed}"/"${sample}"_trimmed.fastq.gz \
+        --threads $((cpu/maxProc)) \
+        | tee -a "${logs}"/"${sample}"_porechop.log
+}
+
+export -f trim
+
+find "$fastq" -type f -name "*.fastq.gz" \
+    | parallel  --bar \
+                --env trim \
+                --env trimmed \
+                --env logs \
+                --env cpu \
+                --env maxProc \
+                --jobs "$maxProc" \
+                'trim {}'
 
 
-####################
-#                  #
-#   FastQc - Raw   #
-#                  #
-####################
+#################
+#               #
+#   Filtering   #
+#               #
+#################
 
+
+function filter()
+{
+    sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+
+    # https://github.com/rrwick/Filtlong
+    # --min_mean_q 90 -> phred 10
+    # --target_bases -> max 100X coverage
+    filtlong \
+        --target_bases $((size*100)) \
+        --keep_percent 90 \
+        --min_length 1000 \
+        --min_mean_q 90 \
+        "$1" \
+        2> >(tee "${logs}"/filtering/"${sample}".txt) \
+        | pigz > "${filtered}"/"${sample}"_filtered.fastq.gz 
+}
+
+export -f filter
+
+[ -d "${logs}"/filtering ] || mkdir -p "${logs}"/filtering
+
+find "$trimmed" -type f -name "*_trimmed.fastq.gz" \
+    | parallel  --bar \
+                --env filter \
+                --env trimmed \
+                --env size \
+                --env filtered \
+                --env logs \
+                --jobs "$maxProc" \
+                'filter {}'
+
+
+######################
+#                    #
+#   Quality Control  #
+#                    #
+######################
+
+
+### FastQC###
 
 # Create folder to store report
 [ -d "${qc}"/fastqc/raw ] || mkdir -p "${qc}"/fastqc/raw
 [ -d "${qc}"/fastqc/trimmed ] || mkdir -p "${qc}"/fastqc/trimmed
+[ -d "${qc}"/fastqc/filtered ] || mkdir -p "${qc}"/fastqc/filtered
 
+function run_fastqc()
+{
+    sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+
+    [ -d "${2}"/"$sample" ] || mkdir -p "${2}"/"$sample"
+
+    fastqc \
+        --o "${2}"/"$sample" \
+        --noextract \
+        --threads $((cpu/maxProc)) \
+        "$1"
+}
+
+# Raw
+find "$fastq"
 # Run fastQC
 fastqc \
-    --o  "${qc}"/fastqc/raw \
+    --o "${qc}"/fastqc/raw \
     --noextract \
     --threads "$cpu" \
-    "${fastq}"/"${prefix}".fastq.gz
+    "${fastq}"/"${sample}".fastq.gz
 
 fastqc \
     --o  "${qc}"/fastqc/trimmed \
     --noextract \
     --threads "$cpu" \
-    "${fastq}"/"${prefix}"_trimmed.fastq.gz
+    "${fastq}"/"${sample}"_trimmed.fastq.gz
 
 
-######################
-#                    #
-#   Centrifuge raw   #
-#                    #
-######################
+### Centrifuge ###
+
+function run_centrifuge()
+{
+    r1="$1"
+    r2=$(sed 's/_R1/_R2/' <<< "$r1")
+    sample=$(cut -d "_" -f 1 <<< $(basename "$r1"))
+
+    [ -d "${2}"/"${sample}" ] || mkdir -p "${2}"/"${sample}"
+
+    #build the command
+    centrifuge \
+        -p "$cpu" \
+        -t \
+        --seed "$RANDOM" \
+        -x "$centrifuge_db" \
+        -1 "$r1" \
+        -2 "$r2" \
+        --report-file "${2}"/"${sample}"/"${sample}"_report.tsv \
+        > "${2}"/"${sample}"/"${sample}".tsv
+
+    cat "${2}"/"${sample}"/"${sample}".tsv | \
+        cut -f 1,3 | \
+        ktImportTaxonomy /dev/stdin -o "${2}"/"${sample}"/"${sample}".html
+}
+
+for i in $(find "$fastq" -type f -name "*_R1*fastq.gz"); do
+    run_centrifuge "$i" "${qc}"/centrifuge/raw
+done
 
 
 # Create folder
@@ -291,17 +439,17 @@ centrifuge \
     -t \
     --seed "$RANDOM" \
     -x "$db" \
-    -U "${fastq}"/"${prefix}"_trimmed.fastq.gz \
-    --report-file "${qc}"/centrifuge/"${prefix}"_report.tsv \
-    > "${qc}"/centrifuge/"${prefix}".tsv
+    -U "${fastq}"/"${sample}"_trimmed.fastq.gz \
+    --report-file "${qc}"/centrifuge/"${sample}"_report.tsv \
+    > "${qc}"/centrifuge/"${sample}".tsv
 
 # Prepare result for display with Krona
-cat "${qc}"/centrifuge/"${prefix}".tsv | \
+cat "${qc}"/centrifuge/"${sample}".tsv | \
     cut -f 1,3 | \
-    ktImportTaxonomy /dev/stdin -o  "${qc}"/centrifuge/"${prefix}".html
+    ktImportTaxonomy /dev/stdin -o  "${qc}"/centrifuge/"${sample}".html
 
 # Visualize the resutls in Firefow browser
-firefox file://"${qc}"/centrifuge/"${prefix}".html &
+firefox file://"${qc}"/centrifuge/"${sample}".html &
 
 
 ########################
@@ -712,7 +860,7 @@ function annotate()
     #Prokka
     prokka  --outdir "${annotation}"/"$sample" \
             --force \
-            --prefix "$sample" \
+            --sample "$sample" \
             --kingdom "$kingdom" \
             --genus "$genus" \
             --species "$species" \
