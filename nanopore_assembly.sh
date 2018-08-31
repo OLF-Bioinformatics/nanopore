@@ -8,7 +8,7 @@
 
 
 #script version
-version="0.2.2"
+version="0.2.3"
 
 
 ######################
@@ -19,10 +19,10 @@ version="0.2.2"
 
 
 # Analysis folder
-export baseDir=""${HOME}"/analyses/YpD1_nanopore"
+export baseDir=""${HOME}"/analyses/burkholderia_nanopore_batch1"
 
 # Reads
-export fast5="/media/6tb_raid10/data/noriko/20170720_2026_YpD1_20JUL2017_NG/fast5"
+export fast5="/media/2TB_NVMe/burkholderia_fast5_1/20180823_1514_Bmallei/fast5"
 
 # Database to use for metagomic analysis of raw data (contamination)
 db="/media/6tb_raid10/db/centrifuge/2017-10-12_bact_vir_h"
@@ -34,21 +34,18 @@ export scripts=""${HOME}"/scripts"
 
 # Maximum number of cores used per sample for parallel processing
 # A highier value reduces the memory footprint.
-export maxProc=8
-
-# Assembly name
-export sample="YpD1"
+export maxProc=6
 
 # Estimated genome size in bp
-export size=5000000
+export size=5800000
 
 # Set smallest contig size for assemblies
 export smallest_contig=1000
 
 #Annotation
 export kingdom="Bacteria"
-export genus="Salmonella"
-export species="enterica"
+export genus="Burkholderia"
+export species="mallei"
 export gram="neg"
 export locus_tag="TOCHANGE"
 export centre="OLF"
@@ -138,14 +135,6 @@ else
     exit 1
 fi
 
-# poretools
-if hash nanoplot 2>/dev/null; then  # if installed
-    poretools -v 2>&1 1>/dev/null | tee -a "${logs}"/log.txt
-else
-    echo >&2 "poretools was not found. Aborting." | tee -a "${logs}"/log.txt
-    exit 1
-fi
-
 # FastQC
 if hash fastqc 2>/dev/null; then 
     fastqc -v | tee -a "${logs}"/log.txt
@@ -162,7 +151,6 @@ else
     echo >&2 "centrifuge was not found. Aborting." | tee -a "${logs}"/log.txt
     exit 1
 fi
-
 
 # minimap2
 if hash minimap2 2>/dev/null; then
@@ -184,7 +172,7 @@ fi
 # Nanopolish
 if hash nanopolish 2>/dev/null; then
     version=$(nanopolish --version | head -n 1)
-    echo "$version" | tee -a "${logs}"/log.txt  # not version option with this software, yet
+    echo "$version" | tee -a "${logs}"/log.txt
 else
     echo >&2 "nanopolish was not found. Aborting." | tee -a "${logs}"/log.txt
     exit 1
@@ -230,7 +218,7 @@ function call_bases_1D()
         read_fast5_basecaller.py \
             -i "$fast5_folder" \
             --barcoding \
-            -t "$cpu" \
+            -t $((cpu/bins)) \
             -s "$fastq_folder" \
             -k "$kit" \
             -f "$flow" \
@@ -241,7 +229,7 @@ function call_bases_1D()
     else
         read_fast5_basecaller.py \
             -i "$fast5_folder" \
-            -t "$cpu" \
+            -t $((cpu/bins)) \
             -s "$fastq_folder" \
             -k "$kit" \
             -f "$flow" \
@@ -257,17 +245,42 @@ function call_bases_1D()
 export -f call_bases_1D
 
 # Use max 12 threads max per instance for Albacore
-bins=$((cpu/12))  # 4
+export bins=$((cpu/12))  # 4
 [ "$bins" -eq 0 ] && bins=1  # in case computer has less than 12 cores
 folder_count=$(find "$fast5" -mindepth 1 -type d | wc -l)
 folder_per_bin=$(((folder_count/bins)+1))  # the "+1" make sure we never have more than 4 batches.
-find "$fast5" -mindepth 1 -type d | parallel -n "$folder_per_bin" 'mkdir batch{#} && mv {} {//}/batch{#}'
+find "$fast5" -mindepth 1 -type d | parallel -n "$folder_per_bin" 'mkdir -p  {//}/batch{#} && mv {} {//}/batch{#}'
 
 find "$fast5" -mindepth 1 -maxdepth 1 -type d | \
-    parallel --dryrun call_bases_1D "SQK-LSK108" "FLO-MIN106" {} "${basecalled}"/{/}
+    parallel    --env bins \
+                --env cpu \
+                --jobs $((cpu/4)) \
+                'call_bases_1D "SQK-LSK108" "FLO-MIN106" {} "${basecalled}"/{/} "barcoded"'
 
-#Merge baecalling results
-find "$basecalled" -type f -name "*/pass/*.fastq.gz" -exec cat {} > "${basecalled}"/pass_all.fastq.gz
+### Merge baecalling results ###
+
+# list summary files
+sumfiles=($(find "$basecalled" -type f -name "*sequencing_summary.txt"))
+
+#write header
+echo -e "filename\tread_id\trun_id\tchannel\tstart_time\tduration\tnum_events\tpasses_filtering\
+\ttemplate_start\tnum_events_template\ttemplate_duration\tnum_called_template\tsequence_length_template\
+\tmean_qscore_template\tstrand_score_template\tcalibration_strand_genome_template\tcalibration_strand_identity_template\
+\tcalibration_strand_accuracy_template\tcalibration_strand_speed_bps_template\tbarcode_arrangement\tbarcode_score\
+\tbarcode_full_arrangement\tfront_score\trear_score\tfront_begin_index\tfront_foundseq_length\trear_end_index\
+\trear_foundseq_length\tkit\tvariant" \
+    > "${basecalled}"/sequencing_summary.txt
+
+#Merge sequencing_summary.txt files, skipping header
+for f in "${sumfiles[@]}"; do
+    cat "$f" | sed -e '1d' >> "${basecalled}"/sequencing_summary.txt
+done
+
+#Merge Pass files
+
+
+#Merge Fail files
+# find "$basecalled" -type f -name "*/pass/*.fastq.gz" -exec cat {} > "${basecalled}"/pass_all.fastq.gz
 
 
 ##########
@@ -277,12 +290,21 @@ find "$basecalled" -type f -name "*/pass/*.fastq.gz" -exec cat {} > "${basecalle
 ##########
 
 
-# NanoPlot on "sequence_summary.txt" file
-
-
+# NanoPlot on "sequence=ing_summary.txt" file
+[ -d "${qc}"/NanoPlot ] || mkdir -p "${qc}"/NanoPlot
+NanoPlot \
+    -t "$cpu" \
+    -o "${qc}"/NanoPlot \
+    -p nanoplot \
+    --loglength \
+    --summary "${basecalled}"/sequencing_summary.txt \
+    --plot kde hex dot
 
 # nanoQC on fastq file
-
+[ -d "${qc}"/nanoQC ] || mkdir -p "${qc}"/nanoQC
+python3 "${scripts}"/nanoQC_mmap.py \
+    -f "$basecalled" \
+    -o "${qc}"/nanoQC
 
 
 ################
