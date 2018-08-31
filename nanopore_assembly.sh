@@ -8,7 +8,7 @@
 
 
 #script version
-version="0.2.3"
+version="0.2.4"
 
 
 ######################
@@ -276,11 +276,31 @@ for f in "${sumfiles[@]}"; do
     cat "$f" | sed -e '1d' >> "${basecalled}"/sequencing_summary.txt
 done
 
+[ -d "${basecalled}"/pass ] || mkdir "${basecalled}"/pass
+[ -d "${basecalled}"/fail ] || mkdir "${basecalled}"/fail
+state=('pass' 'fail')
+
 #Merge Pass files
+# and compress them?
+for b in $(find "$basecalled" -mindepth 1 -maxdepth 1 -type d -name "*batch*"); do
+    for s in "${state[@]}"; do
+        for c in $(find "${b}"/workspace/"${s}" -mindepth 1 -maxdepth 1 -type d); do
+            barcode=$(basename "$c")
+            # Create output folder
+            [ -d "${basecalled}"/"${s}"/"$barcode" ] || mkdir -p "${basecalled}"/"${s}"/"$barcode"
+            for f in $(find "$c" -type f -name "*.fastq"); do
+                # concaterate files from batches and rename output file accorfing to barcode
+                cat "$f" >> "${basecalled}"/"${s}"/"${barcode}"/"${barcode}"_"${s}".fastq
+            done
+        done
+    done
+done
+            
+# Remove batch folder
+# find "$basecalled" -maxdepth 1 -type d -name "*batch*" -exec rm -rf {} \;
 
-
-#Merge Fail files
-# find "$basecalled" -type f -name "*/pass/*.fastq.gz" -exec cat {} > "${basecalled}"/pass_all.fastq.gz
+# compress all fastq files
+find "$basecalled" -type f -name "*.fastq" -exec pigz {} \;
 
 
 ##########
