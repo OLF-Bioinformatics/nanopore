@@ -8,7 +8,7 @@
 
 
 #script version
-version="0.2.4"
+version="0.3.0"
 
 
 ######################
@@ -23,9 +23,10 @@ export baseDir=""${HOME}"/analyses/burkholderia_nanopore_batch1"
 
 # Reads
 export fast5="/media/2TB_NVMe/burkholderia_fast5_1/20180823_1514_Bmallei/fast5"
+export fastq_reads="/media/30tb_raid10/data/burkholderia/illumina/"
 
 # Database to use for metagomic analysis of raw data (contamination)
-db="/media/6tb_raid10/db/centrifuge/2017-10-12_bact_vir_h"
+db="/media/30tb_raid10/db/centrifuge/2017-10-12_bact_vir_h"
 # db="/media/6tb_raid10/db/centrifuge/nt"
 
 # Program location
@@ -34,18 +35,21 @@ export scripts=""${HOME}"/scripts"
 
 # Maximum number of cores used per sample for parallel processing
 # A highier value reduces the memory footprint.
-export maxProc=6
+export maxProc=4
 
 # Estimated genome size in bp
-export size=5800000
+export size=4850000
+
+# Set assembler to use: unicycler, unicycler_hybrid, canu or flye
+export assembler="unicycler"
 
 # Set smallest contig size for assemblies
 export smallest_contig=1000
 
 #Annotation
 export kingdom="Bacteria"
-export genus="Burkholderia"
-export species="mallei"
+export genus="Salmonella"
+export species="enterica"
 export gram="neg"
 export locus_tag="TOCHANGE"
 export centre="OLF"
@@ -179,7 +183,7 @@ else
 fi
 
 
-#check Centrifuge datase
+#check Centrifuge database
 if [ -s "${db}.1.cf" ]; then
     echo -e "\nCentrifuge database: $(basename "$db")" | tee -a "${logs}"/log.txt
 else
@@ -194,6 +198,61 @@ if [ $(find "$fast5" -type f -name "*.fast5" | wc -l) -eq 0 ]; then
 fi
 
 
+######################
+#                    #
+#   Demultiplexing   #
+#                    #
+######################
+
+
+# Since Guppy, we need to convert multi-reads fast5 to single-read fast5
+# about 50min to convert 2M reads.
+multi_to_single_fast5 \
+    --input_path "$fast5" \
+    --save_path "${fast5}"/singles \
+    --threads "$cpu"
+
+rm "${fast5}"/*.fast5
+
+# Using Deepbinner
+# $((cpu/2)) because we want to set it to number of physical cores
+# https://www.tensorflow.org/guide/performance/overview
+# if used ligation barcoding kit
+deepbinner realtime \
+    --in_dir "${fast5}"/singles \
+    --out_dir "${fast5}"/demultiplexed \
+    --native \
+    --intra_op_parallelism_threads $((cpu/2)) \
+    --omp_num_threads $((cpu/2))
+
+# if used rapid barcoding kit
+deepbinner realtime \
+    --in_dir "${fast5}"/singles \
+    --out_dir "${fast5}"/demultiplexed \
+    --rapid \
+    --intra_op_parallelism_threads $((cpu/2)) \
+    --omp_num_threads $((cpu/2))
+
+# Cleanup
+rm -rf "${fast5}"/singles
+
+#convert back to multi
+# Increase Guppy speed?
+for i in $(find "${fast5}"/demultiplexed -mindepth 1 -maxdepth 1 -type d); do
+    barcode="$(basename "$i")"
+    outdir="${fast5}"/demul_multi/"$barcode"
+
+    [ -d "$outdir" ] || mkdir -p "$outdir"
+
+    single_to_multi_fast5 \
+        --input_path "$i" \
+        --save_path "$outdir" \
+        --threads "$cpu"
+done
+
+# cleanup
+rm -rf "${fast5}"/demultiplexed
+
 
 ###################
 #                 #
@@ -202,105 +261,125 @@ fi
 ###################
 
 
-# Use albacore
-
-function call_bases_1D()
+# Use Guppy
+function call_bases_guppy()
 {
-    # Will not do basecalling on ".fast5.tmp" files. They need to be renamed
-
     kit="$1"  # "SQK-LSK108"
     flow="$2"  # "FLO-MIN106"
     fast5_folder="$3"  # top folder - will look recursively for fast5 files because "-r" option
     fastq_folder="$4"
-    barcoded="$5"
 
-    if [[ "$barcoded" == "barcoded" ]]; then
-        read_fast5_basecaller.py \
-            -i "$fast5_folder" \
-            --barcoding \
-            -t $((cpu/bins)) \
-            -s "$fastq_folder" \
-            -k "$kit" \
-            -f "$flow" \
-            -r \
-            -o "fastq" \
-            -q 0 \
-            --disable_pings
-    else
-        read_fast5_basecaller.py \
-            -i "$fast5_folder" \
-            -t $((cpu/bins)) \
-            -s "$fastq_folder" \
-            -k "$kit" \
-            -f "$flow" \
-            -r \
-            -o "fastq" \
-            -q 0 \
-            --disable_pings
+    guppy_bin_folder=$(dirname $(which guppy_basecaller))
+    guppy_data_folder="${guppy_bin_folder%/bin}/data"
 
-        #files of most interest are found in "${fastq_folder}"/workplace/pass
-    fi
+    #####   CPU mode   #####
+
+    # Using Flip-Flop mode
+    guppy_basecaller \
+        --input_path "$fast5_folder" \
+        --save_path "$fastq_folder" \
+        --kit "$kit" \
+        --flowcell "$flow" \
+        --recursive \
+        --records_per_fastq 0 \
+        --disable_pings \
+        --model_file ""${guppy_data_folder}"/template_r9.4.1_450bps_large_flipflop.jsn" \
+        --calib_detect \
+        --calib_reference "lambda_3.6kb.fasta" \
+        --hp_correct 1 \
+        --enable_trimming 1 \
+        --trim_strategy 'dna' \
+        --qscore_filtering \
+        --num_callers 2 \
+        --cpu_threads_per_caller 24
+
+    #####   CPU mode   #####  
+
+    # ( time sudo nvidia-docker run \
+    #     -v "${DATA_DIR}":/home/workspace \
+    #     docker.io/duceppemo/guppy_gpu:"${BIN_VERSION}" \
+    #     /usr/bin/guppy_basecaller \
+    #         --input_path /home/workspace/"$BC" \
+    #         --save_path /home/workspace/basecalled/"$BC" \
+    #         --kit "$kit" \
+    #         --flowcell "$flow" \
+    #         --recursive \
+    #         --records_per_fastq 0 \
+    #         --disable_pings \
+    #         --model_file template_r9.4.1_450bps_large_flipflop.jsn \
+    #         --calib_detect \
+    #         --calib_reference lambda_3.6kb.fasta \
+    #         --hp_correct 1 \
+    #         --enable_trimming 1 \
+    #         --trim_strategy 'dna' \
+    #         --trim_threshold 2.5 \
+    #         --trim_min_events 3 \
+    #         --qscore_filtering \
+    #         --min_qscore 7 \
+    #         --gpu_runners_per_device 2 \
+    #         --chunk_size 1000 \
+    #         --chunks_per_runner 1000 \
+    #         --device "cuda:0"
+    # ) >""${LOG_DIR}"/"${BC}".call_variants.log" 2>&1
 }
 
-export -f call_bases_1D
+export -f call_bases_guppy
 
-# Use max 12 threads max per instance for Albacore
-export bins=$((cpu/12))  # 4
-[ "$bins" -eq 0 ] && bins=1  # in case computer has less than 12 cores
-folder_count=$(find "$fast5" -mindepth 1 -type d | wc -l)
-folder_per_bin=$(((folder_count/bins)+1))  # the "+1" make sure we never have more than 4 batches.
-find "$fast5" -mindepth 1 -type d | parallel -n "$folder_per_bin" 'mkdir -p  {//}/batch{#} && mv {} {//}/batch{#}'
+for i in $(find "${fast5}"/demul_multi -mindepth 1 -maxdepth 1 -type d); do
+    echo $(date)
+    barcode=$(basename "$i"); echo $barcode
+    echo "Basecalling "$barcode" with Guppy in CPU mode..."
+    call_bases_guppy "SQK-LSK108" "FLO-MIN106" "$i" "${basecalled}"/"$barcode"
+    # call_bases_guppy "SQK-RBK004" "FLO-MIN106" "$i" "${basecalled}"/"$barcode"
+    echo $(date)
+done
 
-find "$fast5" -mindepth 1 -maxdepth 1 -type d | \
-    parallel    --env bins \
-                --env cpu \
-                --jobs $((cpu/4)) \
-                'call_bases_1D "SQK-LSK108" "FLO-MIN106" {} "${basecalled}"/{/} "barcoded"'
+# Compress the basecalled fastq
+for i in $(find "$basecalled" -mindepth 2 -maxdepth 2 -type d); do  # pass and fail
+    flag=$(basename "$i")
+    barcode=$(basename $(dirname "$i"))
+    # echo "${i}"/"${barcode}"_"${flag}".fastq.gz
+    cat "${i}"/*.fastq | pigz > "${i}"/"${barcode}"_"${flag}".fastq.gz
+    # # Remove non compressed files
+    rm "${i}"/*.fastq
+done
 
 ### Merge baecalling results ###
-
 # list summary files
 sumfiles=($(find "$basecalled" -type f -name "*sequencing_summary.txt"))
 
 #write header
 echo -e "filename\tread_id\trun_id\tchannel\tstart_time\tduration\tnum_events\tpasses_filtering\
-\ttemplate_start\tnum_events_template\ttemplate_duration\tnum_called_template\tsequence_length_template\
-\tmean_qscore_template\tstrand_score_template\tcalibration_strand_genome_template\tcalibration_strand_identity_template\
-\tcalibration_strand_accuracy_template\tcalibration_strand_speed_bps_template\tbarcode_arrangement\tbarcode_score\
-\tbarcode_full_arrangement\tfront_score\trear_score\tfront_begin_index\tfront_foundseq_length\trear_end_index\
-\trear_foundseq_length\tkit\tvariant" \
+\ttemplate_start\tnum_events_template\ttemplate_duration\tsequence_length_template\
+\tmean_qscore_template\tstrand_score_template\tmedian_template\tmad_template\tcalibration_strand_genome\
+\tcalibration_strand_genome_start\tcalibration_strand_genome_end\tcalibration_strand_strand_start\
+\tcalibration_strand_strand_end\tcalibration_strand_num_insertions\tcalibration_strand_num_deletions\
+\tcalibration_strand_num_aligned\tcalibration_strand_num_correct\tcalibration_strand_identity\
+\tcalibration_strand_accuracy\tcalibration_strand_score" \
     > "${basecalled}"/sequencing_summary.txt
 
-#Merge sequencing_summary.txt files, skipping header
+# Merge sequencing_summary.txt files, skipping header
+# add the barcode information at the 20th column
+# if not demultiplexed while basecalling with Albacore
 for f in "${sumfiles[@]}"; do
-    cat "$f" | sed -e '1d' >> "${basecalled}"/sequencing_summary.txt
+    barcode=$(basename $(dirname "$f"))
+    cat "$f" | sed -e '1d' \
+        | awk -v bc="$barcode" -F $'\t' 'BEGIN {OFS = FS} {$20 = bc; print}' \
+        >> "${basecalled}"/sequencing_summary.txt
 done
 
-[ -d "${basecalled}"/pass ] || mkdir "${basecalled}"/pass
-[ -d "${basecalled}"/fail ] || mkdir "${basecalled}"/fail
+# Reorganize using parent "pass" and "fail" folders
 state=('pass' 'fail')
-
-#Merge Pass files
-# and compress them?
-for b in $(find "$basecalled" -mindepth 1 -maxdepth 1 -type d -name "*batch*"); do
+for b in $(find "$basecalled" -mindepth 1 -maxdepth 1 -type d); do
+    barcode=$(basename "$b")
     for s in "${state[@]}"; do
-        for c in $(find "${b}"/workspace/"${s}" -mindepth 1 -maxdepth 1 -type d); do
-            barcode=$(basename "$c")
-            # Create output folder
-            [ -d "${basecalled}"/"${s}"/"$barcode" ] || mkdir -p "${basecalled}"/"${s}"/"$barcode"
-            for f in $(find "$c" -type f -name "*.fastq"); do
-                # concaterate files from batches and rename output file accorfing to barcode
-                cat "$f" >> "${basecalled}"/"${s}"/"${barcode}"/"${barcode}"_"${s}".fastq
-            done
+        for c in $(find "${b}"/"${s}" -type f -name "*.fastq.gz"); do
+            # Copy and rename file
+            [ -d "${basecalled}"/"${s}"/"${barcode}" ] || mkdir -p "${basecalled}"/"${s}"/"${barcode}"
+            mv "$c" "${basecalled}"/"${s}"/"${barcode}"
         done
     done
 done
-            
-# Remove batch folder
-# find "$basecalled" -maxdepth 1 -type d -name "*batch*" -exec rm -rf {} \;
-
-# compress all fastq files
-find "$basecalled" -type f -name "*.fastq" -exec pigz {} \;
 
 
 ##########
@@ -310,21 +389,17 @@ find "$basecalled" -type f -name "*.fastq" -exec pigz {} \;
 ##########
 
 
-# NanoPlot on "sequence=ing_summary.txt" file
-[ -d "${qc}"/NanoPlot ] || mkdir -p "${qc}"/NanoPlot
-NanoPlot \
-    -t "$cpu" \
-    -o "${qc}"/NanoPlot \
-    -p nanoplot \
-    --loglength \
-    --summary "${basecalled}"/sequencing_summary.txt \
-    --plot kde hex dot
+# nanoQC on "sequencing_summary.txt" file
+[ -d "${qc}"/nanoQC/raw/summary ] || mkdir -p "${qc}"/nanoQC/raw/summary
+python3 /home/bioinfo/PycharmProjects/nanoQC/nanoQC_Guppy_v1.py \
+    -s "${basecalled}"/sequencing_summary.txt \
+    -o "${qc}"/nanoQC/raw/summary
 
-# nanoQC on fastq file
-[ -d "${qc}"/nanoQC ] || mkdir -p "${qc}"/nanoQC
-python3 "${scripts}"/nanoQC_mmap.py \
+# nanoQC on fastq files
+[ -d "${qc}"/nanoQC/raw/fastq ] || mkdir -p "${qc}"/nanoQC/raw/fastq
+python3 /home/bioinfo/PycharmProjects/nanoQC/nanoQC_Guppy_v1.py \
     -f "$basecalled" \
-    -o "${qc}"/nanoQC
+    -o "${qc}"/nanoQC/raw/fastq
 
 
 ################
@@ -343,12 +418,22 @@ function trim()
         -i "$1" \
         -o "${trimmed}"/"${sample}"_trimmed.fastq.gz \
         --threads $((cpu/maxProc)) \
-        | tee -a "${logs}"/"${sample}"_porechop.log
+        | tee -a "${logs}"/trimming/"${sample}"_porechop.log
+
+    # cleanup the log file by removing the progress lines
+    cat "${logs}"/trimming/"${sample}"_porechop.log \
+        | grep -vF '%' \
+        > "${logs}"/trimming/"${sample}"_porechop.log.tmp
+
+    mv "${logs}"/trimming/"${sample}"_porechop.log.tmp \
+        "${logs}"/trimming/"${sample}"_porechop.log
 }
 
 export -f trim
 
-find "$fastq" -type f -name "*.fastq.gz" \
+[ -d "${logs}"/trimming ] || mkdir -p "${logs}"/trimming
+
+find "${basecalled}/pass" -type f -name "*.fastq.gz" ! -name "*unclassified*" \
     | parallel  --bar \
                 --env trim \
                 --env trimmed \
@@ -366,21 +451,21 @@ find "$fastq" -type f -name "*.fastq.gz" \
 #################
 
 
+### Careful here. Filtered reads sometimes lead to a poorer quality assembly.
 function filter()
 {
     sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
 
     # https://github.com/rrwick/Filtlong
     # --min_mean_q 90 -> phred 10
+    # --min_length 1000 \
     # --target_bases -> max 100X coverage
     filtlong \
         --target_bases $((size*100)) \
         --keep_percent 90 \
-        --min_length 1000 \
-        --min_mean_q 90 \
         "$1" \
-        2> >(tee "${logs}"/filtering/"${sample}".txt) \
-        | pigz > "${filtered}"/"${sample}"_filtered.fastq.gz 
+        | pigz > "${filtered}"/"${sample}"_filtered.fastq.gz
+        # 2> >(tee "${logs}"/filtering/"${sample}".txt) \
 }
 
 export -f filter
@@ -397,6 +482,9 @@ find "$trimmed" -type f -name "*_trimmed.fastq.gz" \
                 --jobs "$maxProc" \
                 'filter {}'
 
+# Cleanup trimmed reads
+# rm "${trimmed}"/*
+
 
 ######################
 #                    #
@@ -404,6 +492,20 @@ find "$trimmed" -type f -name "*_trimmed.fastq.gz" \
 #                    #
 ######################
 
+
+### nanoQC ###
+
+# nanoQC on fastq file
+[ -d "${qc}"/nanoQC/trimmed ] || mkdir -p "${qc}"/nanoQC/trimmed
+python3 /home/bioinfo/PycharmProjects/nanoQC/nanoQC_Guppy_v1.py \
+    -f "$trimmed" \
+    -o "${qc}"/nanoQC/trimmed
+
+# nanoQC on fastq file
+[ -d "${qc}"/nanoQC/filtered ] || mkdir -p "${qc}"/nanoQC/filtered
+python3 /home/bioinfo/PycharmProjects/nanoQC/nanoQC_Guppy_v1.py \
+    -f "$filtered" \
+    -o "${qc}"/nanoQC/filtered
 
 ### FastQC###
 
@@ -425,29 +527,41 @@ function run_fastqc()
         "$1"
 }
 
-# Raw
-find "$fastq"
-# Run fastQC
-fastqc \
-    --o "${qc}"/fastqc/raw \
-    --noextract \
-    --threads "$cpu" \
-    "${fastq}"/"${sample}".fastq.gz
+export -f run_fastqc
 
-fastqc \
-    --o  "${qc}"/fastqc/trimmed \
-    --noextract \
-    --threads "$cpu" \
-    "${fastq}"/"${sample}"_trimmed.fastq.gz
+#raw
+find "$basecalled" -type f -name "*.fastq.gz" \
+    | parallel --bar run_fastqc {} "${qc}"/fastqc/raw
 
+#trimmed
+find "$trimmed" -type f -name "*.fastq.gz" \
+    | parallel --bar run_fastqc {} "${qc}"/fastqc/trimmed
+
+#filtered
+find "$filtered" -type f -name "*.fastq.gz" \
+    | parallel --bar run_fastqc {} "${qc}"/fastqc/filtered
+
+#Merge all FastQC reports together
+multiqc \
+    -o "${qc}"/fastqc/raw \
+    -n merged_reports.html \
+    "${qc}"/fastqc/raw
+multiqc \
+    -o "${qc}"/fastqc/trimmed \
+    -n merged_reports.html \
+    "${qc}"/fastqc/trimmed
+multiqc \
+    -o "${qc}"/fastqc/filtered \
+    -n merged_reports.html \
+    "${qc}"/fastqc/filtered
 
 ### Centrifuge ###
 
+[ -d "${qc}"/centrifuge/trimmed ] || mkdir -p "${qc}"/centrifuge/trimmed
+
 function run_centrifuge()
 {
-    r1="$1"
-    r2=$(sed 's/_R1/_R2/' <<< "$r1")
-    sample=$(cut -d "_" -f 1 <<< $(basename "$r1"))
+    sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
 
     [ -d "${2}"/"${sample}" ] || mkdir -p "${2}"/"${sample}"
 
@@ -456,42 +570,23 @@ function run_centrifuge()
         -p "$cpu" \
         -t \
         --seed "$RANDOM" \
-        -x "$centrifuge_db" \
-        -1 "$r1" \
-        -2 "$r2" \
+        -x "$db" \
+        -U "$1" \
         --report-file "${2}"/"${sample}"/"${sample}"_report.tsv \
         > "${2}"/"${sample}"/"${sample}".tsv
 
     cat "${2}"/"${sample}"/"${sample}".tsv | \
         cut -f 1,3 | \
         ktImportTaxonomy /dev/stdin -o "${2}"/"${sample}"/"${sample}".html
+
+    # Visualize the resutls in Firefow browser
+    firefox file://"${2}"/"${sample}"/"${sample}".html &
 }
 
-for i in $(find "$fastq" -type f -name "*_R1*fastq.gz"); do
-    run_centrifuge "$i" "${qc}"/centrifuge/raw
+for i in $(find "$trimmed" -type f -name "*fastq.gz"); do
+    run_centrifuge "$i" "${qc}"/centrifuge/trimmed
 done
 
-
-# Create folder
-[ -d "${qc}"/centrifuge ] || mkdir -p "${qc}"/centrifuge
-
-# Run centrifuge
-centrifuge \
-    -p "$cpu" \
-    -t \
-    --seed "$RANDOM" \
-    -x "$db" \
-    -U "${fastq}"/"${sample}"_trimmed.fastq.gz \
-    --report-file "${qc}"/centrifuge/"${sample}"_report.tsv \
-    > "${qc}"/centrifuge/"${sample}".tsv
-
-# Prepare result for display with Krona
-cat "${qc}"/centrifuge/"${sample}".tsv | \
-    cut -f 1,3 | \
-    ktImportTaxonomy /dev/stdin -o  "${qc}"/centrifuge/"${sample}".html
-
-# Visualize the resutls in Firefow browser
-firefox file://"${qc}"/centrifuge/"${sample}".html &
 
 
 ########################
@@ -501,50 +596,69 @@ firefox file://"${qc}"/centrifuge/"${sample}".html &
 ########################
 
 
-# Assemble with miniasm and polish with racon
-for i in $(find "$fastq" -type f -name "*.fastq.gz"); do
-    sample=$(cut -d "_" -f 1 <<< $(basename "$i"))
+function assemble()
+{
+    sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+    ass="$2"
     
-    # canu \
-    #     -p "$sample" \
-    #     -d "${assemblies}"/canu/"$sample" \
-    #     genomeSize="$size" \
-    #     -nanopore-raw "${fastq}"/"${sample}"_trimmed.fastq.gz
+    if [[ "$ass" == "unicycler" ]]; then
+        unicycler \
+            -l "$1" \
+            -o "${assemblies}"/"${ass}"/"$sample" \
+            -t $((cpu/maxProc)) \
+            --verbosity 2 \
+            --mode normal
 
-    # flye \
-    #     --nano-raw "$i" \
-    #     --out-dir "${assemblies}"/flye/"$sample" \
-    #     --genome-size "$size" \
-    #     --iterations 3 \
-    #     --threads "$cpu"
+        mv "${assemblies}"/"${ass}"/"${sample}"/assembly.fasta \
+            "${assemblies}"/"${ass}"/"${sample}"/"${sample}".fasta
+    elif [[ "$ass" == "unicycler_hybrid" ]]; then
+        unicycler \
+            -1 unmerged_R1.fastq.gz \
+            -2 unmerged R2.fastq.gz \
+            -s merged.fastq.gz \
+            --no_correct \
+            -l "$1" \
+            -o "${assemblies}"/"${ass}"/"$sample" \
+            -t $((cpu/maxProc)) \
+            --verbosity 2 \
+            --mode normal
 
-    unicycler \
-        -l "$i" \
-        -o $"{assemblies}"/unicycler/"$sample" \
-        -t "$cpu" \
-        --verbosity 2 \
-        --mode normal
+        mv "${assemblies}"/"${ass}"/"${sample}"/assembly.fasta \
+            "${assemblies}"/"${ass}"/"${sample}"/"${sample}".fasta
+    elif [[ "$ass" == "canu" ]]; then
+        canu \
+            -p "$sample" \
+            -d "${assemblies}"/"${ass}"/"$sample" \
+            genomeSize="$size" \
+            maxTreads=$((cpu/maxProc)) \
+            -nanopore-raw "$1"
 
-    mv "${assemblies}"/unicycler/"${sample}"/assembly.fasta \
-        "${assemblies}"/unicycler/"${sample}"/"${sample}".fasta
+        # Maybe some cleanup
+    elif [[ "$ass" == "flye" ]]; then
+        flye \
+            --nano-raw "$1" \
+            --out-dir "${assemblies}"/"${ass}"/"$sample" \
+            --genome-size "$size" \
+            --iterations 3 \
+            --threads $((cpu/maxProc))
+        # Maybe some cleanup
+    else
+        echo 'Please chose one of the following assembler: "unicycler", "unicycler_hybrid", "canu" or "flye"'
+    fi
+}
 
-    circlator fixstart \
-        --verbose \
-        "${assemblies}"/unicycler/"${sample}"/"${sample}".fasta \
-        "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered
+export -f assemble
 
-    # Adjust max line width of fasta file
-    perl "${scripts}"/formatFasta.pl \
-        -i "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta \
-        -o "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta.tmp \
-        -w 80
-
-    # Rename header
-    # sed -i '/^>/s/$/_unicycler/' "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta.tmp
-    
-    mv "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta.tmp \
-        "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta
-done
+find "${trimmed}" -type f -name "*.fastq.gz" \
+    | parallel  --bar \
+                --env cpu \
+                --env maxProc \
+                --env assemble \
+                --env assembler \
+                --env assemblies \
+                --env size \
+                --jobs "$maxProc" \
+                'assemble {} unicycler'
 
 
 #################
@@ -554,89 +668,143 @@ done
 #################
 
 
-# Polish
+# Polish with Medaka
+# https://github.com/nanoporetech/medaka
+source activate medaka
 
-function polish()
+function polish_medaka()
 {
-    sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+    sample=$(basename "$1" ".fasta")
 
     [ -d "${polished}"/"$sample" ] || mkdir -p "${polished}"/"$sample"
 
-    # Convert fastq to fasta
-    zcat "$1" \
-        | sed -n '1~4s/^@/>/p;2~4p' \
-        > "${polished}"/"${sample}"/"${sample}"_reads.fasta
-
-    # Index draft genome
-    bwa index \
-        "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta
-
-    minimap2 \
-        -ax map-ont \
+    # -m r94 -> if default algorithm
+    medaka_consensus \
+        -i "${basecalled}"/pass/"${sample}"/"${sample}"_pass.fastq.gz \
+        -d "$1" \
+        -o "${polished}"/"$sample" \
         -t $((cpu/maxProc)) \
-        "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta \
-        "${polished}"/"${sample}"/"${sample}"_reads.fasta | \
-    samtools sort -@ $((cpu/maxProc)) -o "${polished}"/"${sample}"/"${sample}".bam -
+        -m r941_flip
 
-    # Index bam file
-    samtools index -@ $((cpu/maxProc)) "${polished}"/"${sample}"/"${sample}".bam
-
-    # Index reads for nanopolish
-    nanopolish index \
-        -d /media/6tb_raid10/data/salmonella_human_birds/nanopore/20180503_1623_Wild_Bird_8samples_2018-05-03/fast5 \
-        -s "${basecalled}"/sequencing_summary.txt \
-        "${polished}"/"${sample}"/"${sample}"_reads.fasta
-
-    # Run nanopolish
-    python "${prog}"/nanopolish/scripts/nanopolish_makerange.py \
-        "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta \
-        | parallel --results "${polished}"/"${sample}"/nanopolish.results -j $((cpu/maxProc)) \
-            nanopolish variants \
-                --consensus "${polished}"/"${sample}"/"${sample}"_nanopolished.{1}.fa \
-                -w {1} \
-                -r "${polished}"/"${sample}"/"${sample}"_reads.fasta \
-                -b "${polished}"/"${sample}"/"${sample}".bam \
-                -g "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta \
-                -t 1 \
-                -q dcm,dam \
-                --fix-homopolymers
-
-    # Merge individual segments
-    python  "${prog}"/nanopolish/scripts/nanopolish_merge.py \
-        "${polished}"/"${sample}"/"${sample}"_nanopolished.*.fa \
-        > "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta
-
-    # Adjust max line width of fasta file
-    perl "${scripts}"/formatFasta.pl \
-        -i "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta \
-        -o "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta.tmp \
-        -w 80
-
-    # Rename header
-    # sed -i '/^>/s/$/_nanopolish/' "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta.tmp
-    
-    mv "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta.tmp \
-        "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta
-
-    # Cleanup all but fasta read file and polished assembly
-    find "${polished}"/"$sample" -type f ! -name "*_nanopolished.fasta" ! -name "*_reads.fasta" -exec rm -rf {} \;
-    rm -rf "${polished}"/"${sample}"/nanopolish.results
+    # Rename sample
+    mv "${polished}"/"${sample}"/consensus.fasta \
+        "${polished}"/"${sample}"/"${sample}"_medaka.fasta
 }
 
-export -f polish
+export -f polish_medaka
 
-find "$fastq" -type f -name "*.fastq.gz" | \
-parallel    --bar \
-            --env polish \
-            --env qc \
-            --env polished \
-            --env assemblies \
-            --env basecalled \
-            --env prog \
-            --env cpu \
-            --env maxProc \
-            --jobs "$maxProc"  \
-            "polish {}"
+find "$assemblies" -type f -name "*.fasta" \
+    | parallel  --bar \
+                --env polish_medaka \
+                --env polished \
+                --env cpu \
+                --env maxProc \
+                'polish_medaka {}'
+
+source deactivate medaka
+
+#Cleanup
+find "${polished}" -mindepth 2 -type f ! -name "*.fasta" -exec rm -rf {} \;
+
+
+# # Polish with nanopolish
+# function polish()
+# {
+#     sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+
+#     [ -d "${polished}"/"$sample" ] || mkdir -p "${polished}"/"$sample"
+
+#     # Convert fastq to fasta
+#     zcat "$1" \
+#         | sed -n '1~4s/^@/>/p;2~4p' \
+#         > "${polished}"/"${sample}"/"${sample}"_reads.fasta
+
+#     # Index draft genome
+#     bwa index \
+#         "${assemblies}"/unicycler/"${sample}"/"${sample}".fasta
+
+#     minimap2 \
+#         -ax map-ont \
+#         -t $((cpu/maxProc)) \
+#         "${assemblies}"/unicycler/"${sample}"/"${sample}".fasta \
+#         "${polished}"/"${sample}"/"${sample}"_reads.fasta | \
+#     samtools sort -@ $((cpu/maxProc)) -o "${polished}"/"${sample}"/"${sample}".bam -
+
+#     # Index bam file
+#     samtools index -@ $((cpu/maxProc)) "${polished}"/"${sample}"/"${sample}".bam
+
+#     # Index reads for nanopolish
+#     nanopolish index \
+#         -d "$fast5" \
+#         -s "${basecalled}"/sequencing_summary.txt \
+#         "${polished}"/"${sample}"/"${sample}"_reads.fasta
+
+#     # Run nanopolish
+#     python "${prog}"/nanopolish/scripts/nanopolish_makerange.py \
+#         "${assemblies}"/unicycler/"${sample}"/"${sample}".fasta \
+#         | parallel  --results "${polished}"/"${sample}"/nanopolish.results \
+#                     --env polished \
+#                     --env assemblies \
+#                     -P $((cpu/maxProc)) \
+#                     nanopolish variants \
+#                         --consensus "${polished}"/"${sample}"/"${sample}"_nanopolished.{1}.fa \
+#                         --window={1} \
+#                         --methylation-aware=dcm,dam \
+#                         --fix-homopolymers \
+#                         --threads=1 \
+#                         --min-candidate-frequency 0.1 \
+#                         --reads="${polished}"/"${sample}"/"${sample}"_reads.fasta \
+#                         --bam="${polished}"/"${sample}"/"${sample}".bam \
+#                         --genome="${assemblies}"/unicycler/"${sample}"/"${sample}".fasta
+
+#                         'parallel_polishing {} "$sample"'
+
+#             # nanopolish variants \
+#             #     --consensus "${polished}"/"${sample}"/"${sample}"_nanopolished.{1}.fa \
+#             #     --window={1} \
+#             #     --reads="${polished}"/"${sample}"/"${sample}"_reads.fasta \
+#             #     --bam="${polished}"/"${sample}"/"${sample}".bam \
+#             #     --genome="${assemblies}"/unicycler/"${sample}"/"${sample}".fasta \
+#             #     --threads=1 \
+#             #     --methylation-aware=dcm,dam \
+#             #     --fix-homopolymers
+
+#     # Merge individual segments
+#     python  "${prog}"/nanopolish/scripts/nanopolish_merge.py \
+#         "${polished}"/"${sample}"/"${sample}"_nanopolished.*.fa \
+#         > "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta
+
+#     # Adjust max line width of fasta file
+#     perl "${scripts}"/formatFasta.pl \
+#         -i "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta \
+#         -o "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta.tmp \
+#         -w 80
+
+#     # Rename header
+#     # sed -i '/^>/s/$/_nanopolish/' "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta.tmp
+    
+#     mv "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta.tmp \
+#         "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta
+
+#     # Cleanup all but fasta read file and polished assembly
+#     find "${polished}"/"$sample" -type f ! -name "*_nanopolished.fasta" ! -name "*_reads.fasta" -exec rm -rf {} \;
+#     rm -rf "${polished}"/"${sample}"/nanopolish.results
+# }
+
+# export -f polish
+
+# find "$filtered" -type f -name "*.fastq.gz" | \
+# parallel    --bar \
+#             --env polish \
+#             --env qc \
+#             --env polished \
+#             --env assemblies \
+#             --env basecalled \
+#             --env prog \
+#             --env cpu \
+#             --env maxProc \
+#             --jobs "$maxProc"  \
+#             "polish {}"
 
 
 # Compare pre- and post-nanopolished genomes
@@ -646,48 +814,35 @@ function compare_assemblies()
 
     [ -d "${qc}"/mummer/"$sample" ] || mkdir -p "${qc}"/mummer/"$sample"
 
-    # mummer -mum \
-    #     -l 20 \
-    #     -b \
-    #     -n \
-    #     "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta \
-    #     "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta \
-    #     > "${qc}"/mummer/"${sample}"/"${sample}".mum
-
-    contigs=($(cat "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta | grep -E "^>" | cut -d " " -f 1 | tr -d ">"))
-
-    # for i in "${contigs[@]}"; do  # for every fasta entry
-    #     mummerplot \
-    #         -p "${qc}"/mummer/"${sample}"/"${sample}"_"${i}" \
-    #         -title 'Pre- versus post-nanopolish' \
-    #         -r "$i" -q "$i" \
-    #         --png \
-    #         "${qc}"/mummer/"${sample}"/"${sample}".mum
-    # done
-
-    nucmer --mum \
-        --delta "${qc}"/mummer/"${sample}"/"${sample}".mum \
-        "${polished}"/"${sample}"/"${sample}"_nanopolished.fasta \
-        "${assemblies}"/unicycler/"${sample}"/"${sample}"_ordered.fasta
+    nucmer \
+        --mum \
+        --threads=$((cpu/maxProc)) \
+        --delta "${qc}"/mummer/"${sample}"/"${sample}".delta \
+        "${polished}"/"${sample}"/"${sample}"_medaka.fasta \
+        "${assemblies}"/"${assembler}"/"${sample}"/"${sample}".fasta
 
     mummerplot \
         -p "${qc}"/mummer/"${sample}"/"${sample}" \
-        -title 'Pre- versus post-nanopolish' \
-        -r 1 -q 1 \
-        -layout \
-        -large \
+        -title 'Pre versus Post medaka' \
+        --layout \
+        --large \
+        --color \
         --png \
-        "${qc}"/mummer/"${sample}"/"${sample}".mum
+        "${qc}"/mummer/"${sample}"/"${sample}".delta
 
+    dnadiff \
+        -p "${qc}"/mummer/"${sample}"/"${sample}" \
+        -d "${qc}"/mummer/"${sample}"/"${sample}".delta
 }
 
 export -f compare_assemblies
 
-find "$polished" -type f -name "*_nanopolished.fasta" | \
+find "$polished" -type f -name "*.fasta" | \
 parallel    --bar \
             --env compare_assemblies \
             --env polished \
             --env assemblies \
+            --env assembler \
             --env qc \
             --env cpu \
             --env maxProc \
@@ -706,7 +861,7 @@ function get_coverage()  # unsing unmerged reads only
         -ax map-ont \
         -t $((cpu/maxProc)) \
         "$1" \
-        "${polished}"/"${sample}"/"${sample}"_reads.fasta | \
+        "${trimmed}"/"${sample}"_trimmed.fastq.gz | \
     samtools view -@ $((cpu/maxProc)) -b -h -F 4 - | \
     samtools sort -@ $((cpu/maxProc)) - | \
     samtools rmdup - "${qc}"/coverage/"${sample}"/"${sample}".bam
@@ -721,8 +876,8 @@ function get_coverage()  # unsing unmerged reads only
 
     printf "%s\t%.*f\n" "$sample" 0 "$average_cov" | tee -a "${qc}"/coverage/average_cov.tsv
 
-    #Remove reads in fasta format
-    rm "${polished}"/"${sample}"/"${sample}"_reads.fasta
+    #Remove reads in fasta format  -> for nanopolish
+    # rm "${polished}"/"${sample}"/"${sample}"_reads.fasta
 }
 
 export -f get_coverage
@@ -730,13 +885,13 @@ export -f get_coverage
 [ -d "${qc}"/coverage ] || mkdir -p "${qc}"/coverage
 echo -e "Sample\tAverage_Cov" > "${qc}"/coverage/average_cov.tsv
 
-find "$polished" -type f -name "*_nanopolished.fasta" | \
+find "$polished" -type f -name "*.fasta" | \
     parallel    --bar \
                 --env get_coverage \
                 --env cpu \
                 --env maxProc \
                 --env qc \
-                --jobs "$maxProc"  \
+                --jobs "$maxProc" \
                 "get_coverage {}"
 
 # Qualimap
@@ -748,14 +903,12 @@ function run_qualimap()
 
     qualimap bamqc \
         --paint-chromosome-limits \
-        --output-genome-coverage "${qc}"/coverage/qualimap/"$sample"_coverage \
         -bam "$1" \
-        --java-mem-size="${mem}"g \
+        --java-mem-size="${mem}"G \
         -nt $((cpu/maxProc)) \
         -outdir "${qc}"/coverage/qualimap/"$sample" \
         -outfile "${sample}" \
-        -outformat HTML \
-        -ip
+        -outformat HTML
 
     # Remove bam files
     rm -rf "${qc}"/coverage/"$sample"
@@ -770,8 +923,8 @@ parallel    --bar \
             --env mem \
             --env cpu \
             --env maxProc \
-            --jobs "$maxProc"
-            "run_qualimap {}"
+            --jobs "$maxProc" \
+            'run_qualimap {}'
 
 
 # Blast genomes on nr
@@ -832,8 +985,8 @@ function blast()
 # It's faster to run the blast on long contigs with all cores one sample at the time
 # than to parallel blast the samples with fewer cores, at least for nt
 c=0
-n=$(find "$polished" -type f -name "*_nanopolished.fasta" | wc -l)
-for i in $(find "$polished" -type f -name "*_nanopolished.fasta"); do
+n=$(find "$polished" -type f -name "*.fasta" | wc -l)
+for i in $(find "$polished" -type f -name "*.fasta"); do
     let c+=1
     echo -ne "Blasting assembly "${c}"/"${n}" \\r"
     blast "$i"
@@ -843,7 +996,7 @@ done
 ### QUAST ###
 
 declare -a genomes=()
-for i in $(find "$polished" -type f -name "*_nanopolished.fasta"); do 
+for i in $(find "$polished" -type f -name "*.fasta"); do 
     genomes+=("$i")
 done
 
@@ -875,7 +1028,7 @@ function run_quast()
 export -f run_quast  # -f is to export functions
 
 #run paired-end merging on multiple samples in parallel
-find "$polished" -type f -name "*_nanopolished.fasta" \
+find "$polished" -type f -name "*.fasta" \
     | parallel  --bar \
                 --env run_quast \
                 --env maxProc \
@@ -902,7 +1055,7 @@ function annotate()
     #Prokka
     prokka  --outdir "${annotation}"/"$sample" \
             --force \
-            --sample "$sample" \
+            --prefix "$sample" \
             --kingdom "$kingdom" \
             --genus "$genus" \
             --species "$species" \
@@ -927,7 +1080,7 @@ function annotate()
 
 export -f annotate
 
-find "$polished" -type f -name "*_nanopolished.fasta" | \
+find "$polished" -type f -name "*.fasta" | \
     parallel    --bar \
                 --env annotate \
                 --env annotation \
@@ -966,7 +1119,7 @@ export -f run_resfinder
 for h in $(find "${prog}"/resfinder/resfinder_db -type f -name "*.fsa"); do
     export resfinder_db=$(sed 's/\.fsa//' <<< $(basename "$h"))
 
-    find "$polished" -type f -name "*_nanopolished.fasta" | \
+    find "$polished" -type f -name "*.fasta" | \
         parallel --env run_resfinder \
             --env resfinder_db \
             "run_resfinder {}"
@@ -1010,38 +1163,48 @@ export -f phaster_trim  # -f is to export functions
 [ -d "${phaster}"/assemblies ] || mkdir -p "${phaster}"/assemblies 
 
 #run trimming on multiple assemblies in parallel
-find "$polished" -type f -name "*_nanopolished.fasta" \
+find "$polished" -type f -name "*.fasta" \
     | parallel  --bar \
                 --env phaster_trim \
                 --env prog \
                 'phaster_trim {}'
 
-
-# function phasterSubmit ()
-# {
-#     sample=$(basename "$1" | cut -d '_' -f 1)
-
-#     # {"job_id":"ZZ_7aed0446a6","status":"You're next!..."}
-#     wget --post-file="$i" \
-#         "http://phaster.ca/phaster_api?contigs=1" \
-#         -O "${phaster}"/"${sample}".json \
-#         -o "${phaster}"/"${sample}"_wget.log
-# }
-
-# # Submit to phaster sequencially
-# c=0
-# n=$(find "${phaster}"/assemblies -type f -name "*.fasta" | wc -l)
-# for i in $(find "${phaster}"/assemblies -type f -name "*.fasta"); do
-#     sample=$(cut -d "_" -f 1 <<< $(basename "$i"))
-
-#     let c+=1
-#     echo -ne "Submitting assembly of sample \""${sample}"\" to PHASTER server ("${c}"/"${n}") \\r"
-
-#     phasterSubmit "$i"
-#     sleep 10
-# done
-
 # Get phaster results
 python3 ~/scripts/checkPhasterServer.py --submit --check \
     -i "${phaster}"/assemblies \
     -o "$phaster"
+
+# extract phaster zip file to access results and rename contigs
+
+
+
+#######
+# assemble metagenomic data
+
+function assemble()
+{
+    sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+
+    [ -d "${assemblies}"/flye_meta/"$sample" ] || mkdir -p "${assemblies}"/flye_meta/"$sample"
+
+    flye \
+        --meta \
+        --nano-raw "$1" \
+        --out-dir "${assemblies}"/flye_meta/"$sample" \
+        --genome-size "$size" \
+        --iterations 3 \
+        --threads $((cpu/maxProc))
+}
+
+export -f assemble
+
+find "${trimmed}"/to_assemble -type f -name "*.fastq.gz" \
+    | parallel  --bar \
+                --env cpu \
+                --env maxProc \
+                --env assemble \
+                --env assembler \
+                --env assemblies \
+                --env size \
+                --jobs "$maxProc" \
+                'assemble {} unicycler'
