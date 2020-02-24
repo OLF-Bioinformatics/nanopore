@@ -8,7 +8,7 @@
 
 
 #script version
-version="0.4.1"
+version="0.4.7"
 
 
 ######################
@@ -19,22 +19,19 @@ version="0.4.1"
 
 
 # Analysis folder
-export baseDir=""${HOME}"/analyses/burkholderia_nanopore_batch1"
+export baseDir=/media/2TB_NVMe/NPWGS_20200217
 
 # Reads
-export fast5="/media/2TB_NVMe/burkholderia_fast5_1/20180823_1514_Bmallei/fast5"
+export fast5=/media/30tb_raid10/data/Mbovis/canada/nanopore/NPWGS_20200217/MBWGS183/20200218_2125_MN28835_ACA114_b6146520/fast5
+
 
 # MinION sequencing kits
-kit="SQK-LSK109"  # Library kit
-flow="FLO-MIN106"  # Flowcell kit
-bk="EXP-NBD104"  # Barcoding kit
+kit="SQK-LSK109"  # Library kit: SQK-LSK109, SQK-LSK108 (discontinued), SQK-RBK004 (rapid),
+flow="FLO-MIN106"  # Flowcell kit: FLO-MIN106, FLO-FLG001
+bk="EXP-NBD104"  # Barcoding kit: SQK-RBK004 (rapid), EXP-NBD104 (1-12), EXP-NBD114 (13-24)
 
 # Barcode to sample name file
-bc_desc=/media/30tb_raid10/data/Mbovis/canada/nanopore/NPWGS-20190521/bc.txt
-
-# Database to use for metagomic analysis of raw data (contamination)
-# db="/media/30tb_raid10/db/centrifuge/2017-10-12_bact_vir_h"
-db="/media/30tb_raid10/db/centrifuge/nt"
+bc_desc=/media/30tb_raid10/data/meta90_low_parasites/minion/bc.txt
 
 # Program location
 export prog=""${HOME}"/prog"
@@ -45,18 +42,26 @@ export scripts=""${HOME}"/scripts"
 export maxProc=4
 
 # Estimated genome size in bp
-export size=4850000
+# export size=4850000  # salmonella
+# export size=6000000  # Pseudomonas
+export size=4400000  # Mbovis
 
-# Set assembler to use: unicycler, unicycler_hybrid, canu or flye
-export assembler="unicycler"
+# Set assembler to use: unicycler, unicycler_hybrid, canu shasta, or flye
+export assembler="shasta"
 
 # Set smallest contig size for assemblies
 export smallest_contig=1000
 
+# #Kraken DB to use
+# export kraken2_db="/media/30tb_raid10/db/kraken2/standard"  # refseq
+export kraken2_db="/media/30tb_raid10/db/kraken2/nt"
+
 #Annotation
 export kingdom="Bacteria"
-export genus="Salmonella"
-export species="enterica"
+# export genus="Salmonella"
+# export species="enterica"
+export genus="Pseudomonas"
+export species="syringaea"
 export gram="neg"
 export locus_tag="TOCHANGE"
 export centre="OLF"
@@ -139,11 +144,28 @@ echo -e "\nnanopore_assembly.sh version "$version"\n" | tee -a "${logs}"/log.txt
 
 # Check for dependencies and log versions
 
-# java
+# Java
 if hash java 2>/dev/null; then 
     java -version 2>&1 1>/dev/null | grep "java version" | tr -d '"' | tee -a "${logs}"/log.txt
 else
     echo >&2 "java was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Python
+if hash python3 2>/dev/null; then 
+    python3 --version | tee -a "${logs}"/log.txt
+else
+    echo >&2 "python3 was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Guppy
+if hash guppy_basecaller 2>/dev/null; then
+    v=$(guppy_basecaller --version | rev | cut -d " " -f 1 | rev)
+    echo "Guppy v"${v}"" | tee -a "${logs}"/log.txt
+else
+    echo >&2 "Guppy was not found. Aborting." | tee -a "${logs}"/log.txt
     exit 1
 fi
 
@@ -155,12 +177,113 @@ else
     exit 1
 fi
 
-# Centrifuge
-if hash centrifuge 2>/dev/null; then 
-    v=$(centrifuge --version | grep -F "version")
-    echo "centrifuge $v" | tee -a "${logs}"/log.txt
+# MultiQC
+source activate multiqc
+if hash multiqc 2>/dev/null; then
+    multiqc --version | tee -a "${logs}"/log.txt
+    source deactivate
 else
-    echo >&2 "centrifuge was not found. Aborting." | tee -a "${logs}"/log.txt
+    echo >&2 "multiqc was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Kraken2
+if hash kraken2 2>/dev/null; then
+    kraken2 --version | grep -F "version" | tee -a "${logs}"/log.txt
+else
+    echo >&2 "kraken2 was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Porechop
+if hash porechop 2>/dev/null; then
+    v=$(porechop --version)
+    echo "Porechop v"${v}"" | tee -a "${logs}"/log.txt
+else
+    echo >&2 "porechop was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Filtlong
+if hash filtlong 2>/dev/null; then
+    filtlong --version | tee -a "${logs}"/log.txt
+else
+    echo >&2 "filtlong was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Flye
+if hash flye 2>/dev/null; then
+    v=$(flye --version)
+    echo "flye v"${v}"" | tee -a "${logs}"/log.txt
+else
+    echo >&2 "flye was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Unicycler
+if hash unicycler 2>/dev/null; then
+    unicycler --version | tee -a "${logs}"/log.txt
+else
+    echo >&2 "unicycler was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Shasta
+if hash shasta 2>/dev/null; then
+    shasta --version | grep -F "Shasta" | tee -a "${logs}"/log.txt
+else
+    echo >&2 "shasta was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Medaka
+source activate medaka
+if [ $? -eq 0 ]; then  # environment was found and activated without error
+    medaka --version | tee -a "${logs}"/log.txt
+    source deactivate
+else
+    echo >&2 "medaka was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+#QUAST
+source activate quast
+if hash quast 2>/dev/null; then
+    quast --version | tee -a "${logs}"/log.txt
+    source deactivate
+else
+    echo >&2 "QUAST was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Mummer
+if hash porechop 2>/dev/null; then
+    v=$(mummer --version)
+    echo "Mummer v"${v}"" | tee -a "${logs}"/log.txt
+else
+    echo >&2 "mummer was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# Prokka
+source activate prokka
+if [ $? -eq 0 ]; then  # environment was found and activated without error
+    prokka --version | tee -a "${logs}"/log.txt
+    source deactivate
+else
+    echo >&2 "prokka was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
+# ResFinder
+perl "${prog}"/resfinder/resfinder.pl -h
+if [ $# -eq 0 ]; then
+    version=$(perl "${prog}"/resfinder/resfinder.pl -h | grep "Current" \
+        | cut -d ":" -f 2 | tr -d " ")
+    echo "resfinder v"${version}"" | tee -a "${logs}"/log.txt
+else
+    echo >&2 "resfinder was not found. Aborting." | tee -a "${logs}"/log.txt
     exit 1
 fi
 
@@ -181,54 +304,26 @@ else
     exit 1
 fi
 
-# Flye
-# Unicycler
-# Filtlong
-# MultiQC
-# nanoQC
-# Canu
-# Mummer
-# Prokka
-# Resfinder
-# CARD + RGI
-# Quast
 # Qualimap
+if hash qualimap 2>/dev/null; then
+    qualimap --version | grep -F "QualiMap" | tee -a "${logs}"/log.txt
+else
+    echo >&2 "qualimap was not found. Aborting." | tee -a "${logs}"/log.txt
+    exit 1
+fi
+
 # Blast
-# # Nanopolish
-# if hash nanopolish 2>/dev/null; then
-#     version=$(nanopolish --version | head -n 1)
-#     echo "$version" | tee -a "${logs}"/log.txt
-# else
-#     echo >&2 "nanopolish was not found. Aborting." | tee -a "${logs}"/log.txt
-#     exit 1
-# fi
-
-# Guppy
-if hash guppy_basecaller 2>/dev/null; then
-    v=$(guppy_basecaller --version | rev | cut -d " " -f 1 | rev)
-    echo "Guppy v"${v}"" | tee -a "${logs}"/log.txt
+if hash blastn 2>/dev/null; then
+    v=$(blastn -version | grep -F "blastn" | cut -d " " -f 2)
+    echo "blastn v"${v}"" | tee -a "${logs}"/log.txt
 else
-    echo >&2 "Guppy was not found. Aborting." | tee -a "${logs}"/log.txt
+    echo >&2 "blastn was not found. Aborting." | tee -a "${logs}"/log.txt
     exit 1
 fi
 
-# Medaka
-source activate medaka
-if [ $? -eq 0 ]; then  # environment was found and activated without error
-    medaka --version | tee -a "${logs}"/log.txt
-    source deactivate
-else
-    echo >&2 "medaka was not found. Aborting." | tee -a "${logs}"/log.txt
-    exit 1
-fi
-
-#check Centrifuge database
-if [ -s "${db}.1.cf" ]; then
-    echo -e "\nCentrifuge database: $(basename "$db")" | tee -a "${logs}"/log.txt
-else
-    echo ""
-    # exit 1
-fi
+# nanoQC
+# Phaster
+# CARD + RGI
 
 
 ####################################
@@ -242,6 +337,8 @@ guppy_bin_folder=$(dirname $(which guppy_basecaller))
 guppy_data_folder="${guppy_bin_folder%/bin}/data"
 
 #####   GPU mode   #####
+#runners * chunks_per_runner * chunk_size < 100000 * [max GPU memory in GB]
+# 2 * 1000 * 1000 < 100000 * 24
 
 guppy_basecaller \
     --input_path "$fast5" \
@@ -256,39 +353,63 @@ guppy_basecaller \
     --calib_detect \
     --calib_reference lambda_3.6kb.fasta \
     --hp_correct 1 \
-    --enable_trimming 1 \
     --trim_strategy 'dna' \
     --trim_threshold 2.5 \
     --trim_min_events 3 \
     --qscore_filtering \
     --min_qscore 7 \
+    --num_callers 4 \
     --gpu_runners_per_device 2 \
     --chunk_size 1000 \
     --chunks_per_runner 1000 \
     --device "cuda:0" \
     --num_barcode_threads "$cpu" \
     --barcode_kits "$bk" \
-    --trim_barcodes \
-    --require_barcodes_both_ends
+    --trim_barcodes
+    # --require_barcodes_both_ends
+
+# If 1D2 experiment, run guppy_basecaller_1d2
+guppy_basecaller_1d2     \
+    --input_path "$basecalled"     \
+    --save_path "$fastq"     \
+    --index_file "$basecalled"/sequencing_summary.txt \
+    --records_per_fastq 0 \
+    --compress_fastq \
+    --disable_pings \
+    --config "${guppy_data_folder}"/dna_r9.5_450bps_1d2_raw.cfg \
+    --num_callers 4 \
+    --gpu_runners_per_device 2 \
+    --chunk_size 1000 \
+    --chunks_per_runner 1000  \
+    --device "cuda:0"
 
 # Trim and demultiplex already basecalled fastq
 guppy_barcoder \
-    --input_path "$fast5" \
-    --save_path "$basecalled" \
+    --input_path "$basecalled" \
+    --save_path "$fastq" \
     --recursive \
     --records_per_fastq 0 \
     --compress_fastq \
     --device "cuda:0" \
     --barcode_kits "$bk" \
-    --trim_barcodes \
-    --require_barcodes_both_ends
+    --trim_barcodes
 
-# Merge the basecalled fastq
+# # no barcodes
+# for i in $(find "$basecalled" -mindepth 1 -maxdepth 1 -type d); do
+#     flag=$(basename "$i")
+#     cat "${i}"/*.fastq.gz > "${i}"/"${flag}".fastq.gz
+#     # Remove non compressed files
+#     find "$i" -type f -name "*fastq_runid_*" -exec rm {} \;
+# done
+
+# Merge the basecalled and demultiplexed fastq
 for i in $(find "$basecalled" -mindepth 2 -maxdepth 2 -type d); do  # pass and fail
     barcode=$(basename "$i")
     flag=$(basename $(dirname "$i"))
     # echo "${i}"/"${barcode}"_"${flag}".fastq.gz
-    cat "${i}"/*.fastq.gz > "${i}"/"${barcode}"_"${flag}".fastq.gz
+    # cat "${i}"/*.fastq.gz > "${i}"/"${barcode}"_"${flag}".fastq.gz  #bash: /bin/cat: Argument list too long
+    find "$i" -mindepth 1 -maxdepth 1 -type f -name "*.fastq.gz" -name "fastq_runid_*" \
+        -exec cat {} \; > "${i}"/"${barcode}"_"${flag}".fastq.gz
     # # Remove non compressed files
     find "$i" -type f -name "*fastq_runid_*" -exec rm {} \;
 done
@@ -329,12 +450,12 @@ find "${basecalled}"/ -type f -name "*_pass*" -o -name "*_fail*" | while read i;
                 # exit 1
             fi
 
-            # echo ""$i" -> "$fullNewName""
+            echo ""$i" -> "$fullNewName""
             mv "$i" "$fullNewName"
         fi
         if [ "$(echo "$pathPart" | grep "$j")" ]; then
             # rename folder too
-            # echo ""$pathPart" -> $(dirname "$pathPart")/"${myArray["$j"]}""
+            echo ""$pathPart" -> $(dirname "$pathPart")/"${myArray["$j"]}""
             mv $pathPart $(dirname "$pathPart")/"${myArray["$j"]}"
         fi
     done
@@ -348,18 +469,20 @@ done
 ##########
 
 
-# nanoQC on "sequencing_summary.txt" file
-[ -d "${qc}"/nanoQC/raw/summary ] || mkdir -p "${qc}"/nanoQC/raw/summary
-python3 /home/bioinfo/PycharmProjects/nanoQC/nanoQC_Guppy_v3.1.5.py \
-    -s "${basecalled}"/sequencing_summary.txt \
-    -o "${qc}"/nanoQC/raw/summary
+# # nanoQC on "sequencing_summary.txt" file
+# [ -d "${qc}"/nanoQC/raw/summary ] || mkdir -p "${qc}"/nanoQC/raw/summary
+# python3 /home/bioinfo/PycharmProjects/nanoQC/nanoQC_Guppy_v3.1.5.py \
+#     -s "${basecalled}"/sequencing_summary.txt \
+#     -o "${qc}"/nanoQC/raw/summary
+
+# Delete calibration strand folder if present
+[ -d "${basecalled}"/calibration_strands ] && rm -rf "${basecalled}"/calibration_strands
 
 # nanoQC on fastq files
 [ -d "${qc}"/nanoQC/raw/fastq ] || mkdir -p "${qc}"/nanoQC/raw/fastq
 python3 /home/bioinfo/PycharmProjects/nanoQC/nanoQC_Guppy_v3.1.5.py \
     -f "$basecalled" \
     -o "${qc}"/nanoQC/raw/fastq
-
 
 function run_fastqc()
 {
@@ -402,6 +525,49 @@ multiqc \
 source deactivate
 
 
+
+################
+#              #
+#   Trimming   #
+#              #
+################
+
+
+# Trim adapters
+function chop()
+{
+    sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+
+    porechop \
+        -i "$1" \
+        -o "${trimmed}"/"${sample}"_trimmed.fastq.gz \
+        --threads $((cpu/maxProc)) \
+        | tee -a "${logs}"/trimming/"${sample}"_porechop.log
+
+    # cleanup the log file by removing the progress lines
+    cat "${logs}"/trimming/"${sample}"_porechop.log \
+        | grep -vF '%' \
+        > "${logs}"/trimming/"${sample}"_porechop.log.tmp
+
+    mv "${logs}"/trimming/"${sample}"_porechop.log.tmp \
+        "${logs}"/trimming/"${sample}"_porechop.log
+}
+
+export -f chop
+
+[ -d "${logs}"/trimming ] || mkdir -p "${logs}"/trimming
+
+find "${basecalled}/pass" -type f -name "*.fastq.gz" ! -name "*unclassified*" \
+    | parallel  --bar \
+                --env chop \
+                --env trimmed \
+                --env logs \
+                --env cpu \
+                --env maxProc \
+                --jobs "$maxProc" \
+                'chop {}'
+
+
 #################
 #               #
 #   Filtering   #
@@ -413,7 +579,7 @@ source deactivate
 function filter()
 {
     #sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
-    sample=$(basename "${1%_pass.fastq.gz}")
+    sample=$(basename "$1" "_trimmed.fastq.gz")
 
     # https://github.com/rrwick/Filtlong
     # --min_mean_q 90 -> phred 10
@@ -431,7 +597,7 @@ export -f filter
 
 [ -d "${logs}"/filtering ] || mkdir -p "${logs}"/filtering
 
-find "$basecalled" -type f -name "*_pass.fastq.gz" ! -name "*unclassified*" \
+find "$trimmed" -type f -name "*_trimmed.fastq.gz" \
     | parallel  --bar \
                 --env filter \
                 --env trimmed \
@@ -440,6 +606,10 @@ find "$basecalled" -type f -name "*_pass.fastq.gz" ! -name "*unclassified*" \
                 --env logs \
                 --jobs "$maxProc" \
                 'filter {}'
+
+# No filtering
+# Just create symbolic links
+# find "$basecalled" -type f -name "*_pass.fastq.gz" ! -name "*unclassified*" -exec ln -s {} "$filtered" \;
 
 
 ######################
@@ -462,7 +632,7 @@ python3 /home/bioinfo/PycharmProjects/nanoQC/nanoQC_Guppy_v3.1.5.py \
 
 
 #filtered
-find "$filtered" -type f -name "*.fastq.gz" \
+find -L "$filtered" -type f -name "*.fastq.gz" \
     | parallel --bar run_fastqc {} "${qc}"/fastqc/filtered
 
 #Merge all FastQC reports together
@@ -474,39 +644,112 @@ multiqc \
 source deactivate
 
 
-### Centrifuge ###
+#########################################
+#                                       #
+#   Taxonomic Classification of reads   #
+#                                       #
+#########################################
 
-[ -d "${qc}"/centrifuge/trimmed ] || mkdir -p "${qc}"/centrifuge/trimmed
 
-function run_centrifuge()
+
+[ -d "${qc}"/kraken2/raw ] || mkdir -p "${qc}"/kraken2/raw
+
+
+function run_kraken2 ()
 {
     sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
 
+    # Create folder to store report
     [ -d "${2}"/"${sample}" ] || mkdir -p "${2}"/"${sample}"
 
-    #build the command
-    
-    centrifuge \
-        -p "$cpu" \
-        --mm \
-        -t \
-        --seed "$RANDOM" \
-        -x "$db" \
-        -U "$1" \
-        --report-file "${2}"/"${sample}"/"${sample}"_report.tsv \
-        > "${2}"/"${sample}"/"${sample}".tsv
+    #run Kraken
+    kraken2 \
+        --memory-mapping \
+        --db "$kraken2_db" \
+        --output "${2}"/"${sample}"/"${sample}".kraken \
+        --report "${2}"/"${sample}"/"${sample}".report.tsv \
+        --threads "$cpu" \
+        --gzip-compressed \
+        "$1" \
+        &> >(tee "${2}"/"${sample}"/"${sample}".kraken2.log)
 
-    cat "${2}"/"${sample}"/"${sample}".tsv | \
-        cut -f 1,3 | \
-        ktImportTaxonomy /dev/stdin -o "${2}"/"${sample}"/"${sample}".html
-
-    # Visualize the resutls in Firefow browser
-    firefox file://"${2}"/"${sample}"/"${sample}".html &
+    #Prepare result for display with Krona
+    ktImportTaxonomy \
+        -q 2 \
+        -t 3 \
+        -o "${2}"/"${sample}"/"${sample}".html \
+        "${2}"/"${sample}"/"${sample}".kraken 
 }
 
-for i in $(find "$trimmed" -type f -name "*fastq.gz"); do
-    run_centrifuge "$i" "${qc}"/centrifuge/trimmed
+for i in $(find -L "${basecalled}/pass" -type f -name "*fastq.gz"); do
+    run_kraken2 "$i" "${qc}"/kraken2/raw
 done
+
+# function run_centrifuge()
+# {
+#     sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+
+#     [ -d "${2}"/"${sample}" ] || mkdir -p "${2}"/"${sample}"
+
+#     #build the command
+    
+#     centrifuge \
+#         -p "$cpu" \
+#         --mm \
+#         -t \
+#         --seed "$RANDOM" \
+#         -x "$db" \
+#         -U "$1" \
+#         --report-file "${2}"/"${sample}"/"${sample}"_report.tsv \
+#         > "${2}"/"${sample}"/"${sample}".tsv
+
+#     cat "${2}"/"${sample}"/"${sample}".tsv | \
+#         cut -f 1,3 | \
+#         ktImportTaxonomy /dev/stdin -o "${2}"/"${sample}"/"${sample}".html
+
+#     # Visualize the resutls in Firefow browser
+#     firefox file://"${2}"/"${sample}"/"${sample}".html &
+# }
+
+# for i in $(find "${basecalled}"/pass -type f -name "*fastq.gz"); do
+#     run_centrifuge "$i" "${qc}"/centrifuge/raw
+# done
+
+
+# ### CCMetagen
+# # https://github.com/vrmarcelino/CCMetagen
+# conda activate ccmetagen
+
+# function ccmeta_it()
+# {
+#     input="$1"
+#     sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+#     [ -d "${qc}"/ccmetagen/"$sample" ] || mkdir -p "${qc}"/ccmetagen/"$sample"
+
+
+#     # Map reads with KMA
+#     kma \
+#         -i "$input" \
+#         -o "${qc}"/ccmetagen/"${sample}"/"$sample" \
+#         -t_db /media/30tb_raid10/db/CCMetagen/compress_ncbi_nt/ncbi_nt \
+#         -t "$cpu" \
+#         -bcNano \
+#         -1t1 -mem_mode -and
+
+#     CCMetagen.py \
+#         -r nt \
+#         -i "${qc}"/ccmetagen/"${sample}"/"${sample}".res \
+#         -o "${qc}"/ccmetagen/"${sample}"/"${sample}".ccmeta
+
+#     CCMetagen_merge.py \
+#         -t Family \
+#         -i "${qc}"/ccmetagen/"${sample}" \
+#         -o "${qc}"/ccmetagen/"${sample}"/merged_samples
+# }
+
+
+
+# source deactivate
 
 
 ########################
@@ -522,8 +765,7 @@ function assemble()
     ass="$2"
 
     [ -d "${assemblies}"/"${ass}" ] || mkdir -p "${assemblies}"/"${ass}"
-    # make assembly graph
-    [ -d "${qc}"/assembly_graphs/"$ass" ] || mkdir -p "${qc}"/assembly_graphs/"$ass" ]
+    [ -d "${qc}"/assembly_graphs/"$ass" ] || mkdir -p "${qc}"/assembly_graphs/"$ass"
     
     if [[ "$ass" == "unicycler" ]]; then
         
@@ -557,7 +799,8 @@ function assemble()
             -o "${assemblies}"/"${ass}"/"$sample" \
             -t $((cpu/maxProc)) \
             --verbosity 2 \
-            --mode normal
+            --mode normal \
+            --pilon_path "${prog}"/pilon/pilon-dev.jar
 
         mv "${assemblies}"/"${ass}"/"${sample}"/assembly.fasta \
             "${assemblies}"/"${ass}"/"${sample}"/"${sample}".fasta
@@ -613,8 +856,7 @@ function assemble()
             ! -name "*.fasta" \
             ! -name "*.gfa" \
             ! -name "*.log" \
-            ! -name "*.report" \
-            -o -name "*unitigs*" \
+            ! -name "*.txt" \
             -exec rm -rf {} \;
     # else
     #     echo 'Please chose one of the following assembler: "unicycler", "unicycler_hybrid", "canu" or "flye"'
@@ -623,7 +865,7 @@ function assemble()
 
 export -f assemble
 
-find "${filtered}" -type f -name "*.fastq.gz" \
+find -L "${filtered}" -type f -name "*.fastq.gz" \
     | parallel  --bar \
                 --env cpu \
                 --env maxProc \
@@ -644,7 +886,7 @@ function fastq2fasta ()
         zcat "$input_fastq" \
         | sed -n '1~4s/^@/>/p;2~4p' \
         > "${input_fastq%.fastq.gz}.fasta"
-    elif [ $(echo "$input_file" | grep -F ".fastq") ]; then
+    elif [ $(echo "$input_fastq" | grep -F ".fastq") ]; then
         cat "$input_fastq" \
         | sed -n '1~4s/^@/>/p;2~4p' \
         > "${input_fastq%.fastq}.fasta"
@@ -674,21 +916,36 @@ function shasta_it()
     fi
 
     # Convert reads to fasta
+    echo "Converting fastq to fasta for Shasta..."
     fastq2fasta "$1"
+    [ -d "${assemblies}"/"${ass}" ] || mkdir -p "${assemblies}"/"${ass}"
     mv "${1%$file_ext}.fasta" "${assemblies}"/"${ass}"/"${sample}".fasta
 
     # Two problems here:
     #   1- Requires sudo
     #   2- Defaults to all CPUs
-    shasta --command assemble \
-        --input "${assemblies}"/"${ass}"/"${sample}".fasta \
-        --output "${assemblies}"/"${ass}"/"$sample" \
+    # shasta --command assemble \
+    #     --input "${assemblies}"/"${ass}"/"${sample}".fasta \
+    #     --assemblyDirectory "${assemblies}"/"${ass}"/"$sample" \
+    #     --memoryBacking 2M \
+    #     --memoryMode filesystem \
+    #     --Reads.minReadLength=10000
+    shasta \
+        --command assemble \
+        --input ""${assemblies}"/"${ass}"/"${sample}".fasta" \
+        --assemblyDirectory "${assemblies}"/"${ass}"/"$sample" \
         --memoryBacking 2M \
         --memoryMode filesystem \
-        --Reads.minReadLength=10000
+        --Reads.minReadLength=10000 \
+        --threads "$cpu" \
+        --MinHash.minBucketSize 5 \
+        --MinHash.maxBucketSize 30 \
+        --MinHash.minFrequency 5 \
+        --Align.minAlignedFraction 0.4 \
+        --Assembly.consensusCaller 'Bayesian:guppy-3.0.5-a'
 
-    shasta --command cleanup \
-        --output "${assemblies}"/"${ass}"/"$sample"
+    shasta --command cleanupBinaryData \
+        --assemblyDirectory "${assemblies}"/"${ass}"/"$sample"
 
     # remove input fasta file
     rm "${assemblies}"/"${ass}"/"${sample}".fasta
@@ -701,17 +958,25 @@ function shasta_it()
         "${assemblies}"/"${ass}"/"${sample}"/"${sample}".gfa
 
     # Make assembly graph
-    [ -d "${qc}"/assembly_graphs/"$ass" ] || mkdir -p "${qc}"/assembly_graphs/"$ass" ]
-
+    [ -d "${qc}"/assembly_graphs/"$ass" ] || mkdir -p "${qc}"/assembly_graphs/"$ass"
     Bandage image \
         "${assemblies}"/"${ass}"/"${sample}"/"${sample}".gfa \
         "${qc}"/assembly_graphs/"${ass}"/"${sample}".png
+
+    # Reformat fasta
+    perl "${scripts}"/formatFasta.pl \
+        -i "${assemblies}"/"${ass}"/"${sample}"/"${sample}".fasta \
+        -o "${assemblies}"/"${ass}"/"${sample}"/"${sample}".fasta1
+    mv "${assemblies}"/"${ass}"/"${sample}"/"${sample}".fasta1 \
+        "${assemblies}"/"${ass}"/"${sample}"/"${sample}".fasta
 }
 
-
-for i in $(find "${filtered}" -type f -name "*.fastq.gz"); do
-    shasta_it "$i" 
-done
+# Loop all the samples
+if [[ "$assembler" == "shasta" ]]; then
+    for i in $(find -L "${filtered}" -type f -name "*.fastq.gz"); do
+        shasta_it "$i" # Needs sudo
+    done
+fi
 
 
 #################
@@ -747,7 +1012,7 @@ function polish_medaka()
         -d "$1" \
         -o "${polished}"/"${assembler}"/"$sample" \
         -t $((cpu/maxProc)) \
-        -m r941_min_high \
+        -m r941_min_high_g344 \
         2>&1 | tee "${polished}"/"${assembler}"/"${sample}"/medaka.log
 
     # Rename sample
@@ -825,6 +1090,32 @@ parallel    --bar \
             --env maxProc \
             --jobs "$maxProc" \
             "compare_assemblies {}"
+
+
+# Fix assembly start -> put dnaA gene first
+function fix_start()
+{
+    sample=$(basename "$1" "_medaka.fasta")
+    [ -d "${baseDir}"/fixstart/"$assembler" ] || mkdir -p "${baseDir}"/fixstart/"$assembler"
+
+    circlator fixstart \
+        "$1" \
+        "${baseDir}"/fixstart/"$assembler"/"$sample"
+
+    # check if dnaA was found
+    # if not, dont keep the new "fixed" assebmly because it has be rerooted from the middle
+
+
+    # cleanup
+    find "${baseDir}"/fixstart/"$assembler" -type f ! -name "*.fasta" -exec rm {} \;
+}
+
+export -f fix_start
+
+find "${polished}"/"$assembler" -type f -name "*.fasta" \
+| parallel --bar --env fix_start --env baseDir 'fix_start {}'
+
+
 
 
 ### Coverage ###
@@ -942,6 +1233,8 @@ function blast()
     echo -e "qseqid\tsseqid\tstitle\tpident\tlength\tmismatch\tgapopen\tqstart\tqend\tsstart\tsend\tevalue\tbitscore\tsscinames\tsskingdoms\tstaxids" \
         > "${qc}"/blast/"${assembler}"/"${sample}"/"${sample}".blastn.bestHit.tsv.tmp
 
+    # Only works with Unicycler
+    # TODO -> Change so it's more universal (works with other assembler headers)
     cat "${qc}"/blast/"${assembler}"/"${sample}"/"${sample}".blastn.all.tsv \
         | sed '1d' \
         | sort -t $'\t' -k1,1g -k13,13gr \
@@ -1030,9 +1323,12 @@ source deactivate
 ###################
 
 
+source activate prokka
+
 function annotate()
 {
     sample=$(basename "$1" "_medaka.fasta")
+    sample="${sample%.fasta}"
 
     #Prokka
     prokka  --outdir "${annotation}"/"${assembler}"/"$sample" \
@@ -1048,6 +1344,7 @@ function annotate()
             --centre "$centre" \
             --cpus $((cpu/maxProc)) \
             --rfam \
+            --protein /media/30tb_raid10/db/blast/prokka_hypoth/Psyringae_tomato_hypth.fasta \
             "$1"
 
     #extract hypothetical proteins
@@ -1079,6 +1376,13 @@ find "${polished}"/"$assembler" -type f -name "*.fasta" | \
                 --jobs "$maxProc" \
                 "annotate {}"
 
+source deactivate
+
+# Run all the assemblers in a row
+# for i in unicycler shasta flye canu; do
+#     export assembler="$i"
+# done
+
 
 ### Resfinder
 
@@ -1086,6 +1390,7 @@ function run_resfinder ()
 {
     # https://bitbucket.org/genomicepidemiology/resfinder/overview
     sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+    sample="${sample%.fasta}"
 
     [ -d "${amr}"/resfinder/"${assembler}"/"$sample" ] || mkdir -p "${amr}"/resfinder/"${assembler}"/"$sample"
 
@@ -1112,9 +1417,10 @@ find "${polished}"/"$assembler" -type f -name "*.fasta" | \
 echo -e 'Sample\tResistance gene\tIdentity\tAlignment Length/Gene Length\tCoverage\tPosition in reference\tContig\tPosition in contig\tPhenotype\tAccession no.' \
     > "${amr}"/resfinder/"${assembler}"/resfinder_merged.tsv.tmp
     
-for i in $(find "${amr}"/"${assembler}"/resfinder -name "*results_tab.txt"); do
+for i in $(find "${amr}"/resfinder/"$assembler" -name "*results_tab.txt"); do
     # sample name is folder name
     sample=$(basename $(dirname "$i"))
+    sample="${sample%.fasta}"
 
     # Add a leading column with sample name
     cat "$i" \
@@ -1137,6 +1443,7 @@ rm "${amr}"/resfinder/"${assembler}"/resfinder_merged.tsv.tmp
 function run_rgi()
 {
     sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+    sample="${sample%.fasta}"
 
     [ -d "${amr}"/rgi/"${assembler}"/"$sample" ] || mkdir -p "${amr}"/rgi/"${assembler}"/"$sample"
 
@@ -1166,6 +1473,7 @@ echo -e 'Sample\tORF_ID\tContig\tStart\tStop\tOrientation\tCut_Off\tPass_Bitscor
 for i in $(find "${amr}"/rgi/"${assembler}" -name "*.txt"); do
     # sample name is folder name
     sample=$(basename $(dirname "$i"))
+    sample="${sample%.fasta}"
 
     # Add a leading column with sample name
     cat "$i" \
@@ -1184,14 +1492,11 @@ rm "${amr}"/rgi/"${assembler}"/rgi_merged.tsv.tmp
 
 ### Phaster
 
-
-# Add assembler folder
-
-
 #trim assemblies
 function phaster_trim()
 {
     sample=$(cut -d '_' -f 1 <<< $(basename "$1"))
+    sample="${sample%.fasta}"
 
     # http://phaster.ca/instructions
     if [ $(cat "$1" | grep -Ec "^>") -gt 1 ]; then  # if more than one contig
@@ -1199,13 +1504,13 @@ function phaster_trim()
         perl "${prog}"/phage_typing/removesmallscontigs.pl \
             2000 \
             "$1" \
-            > "${phaster}"/assemblies/"${sample}"_trimmed2000.fasta
+            > "${phaster}"/"${assembler}"/assemblies/"${sample}".fasta
     elif [ $(cat "$1" | grep -Ec "^>") -eq 1 ]; then  # if only one contig
         #remove contigs smaller than 2000 bp from assembly
         perl "${prog}"/phage_typing/removesmallscontigs.pl \
             1500 \
             "$1" \
-            > "${phaster}"/assemblies/"${sample}"_trimmed1500.fasta
+            > "${phaster}"/"${assembler}"/assemblies/"${sample}".fasta
     else
         echo "No assembly for "$sample""  # Should not get here!
         # exit 1
@@ -1216,7 +1521,7 @@ function phaster_trim()
 export -f phaster_trim  # -f is to export functions
 
  # To store trimmed assemblies for phaster submission
-[ -d "${phaster}"/assemblies ] || mkdir -p "${phaster}"/assemblies 
+[ -d "${phaster}"/"${assembler}"/assemblies ] || mkdir -p "${phaster}"/"${assembler}"/assemblies 
 
 #run trimming on multiple assemblies in parallel
 find "${polished}"/"$assembler" -type f -name "*.fasta" \
@@ -1226,20 +1531,25 @@ find "${polished}"/"$assembler" -type f -name "*.fasta" \
                 'phaster_trim {}'
 
 # Get phaster results
-python3 ~/scripts/checkPhasterServer.py --submit --check \
-    -i "${phaster}"/assemblies \
-    -o "$phaster"
+# python3 ~/scripts/checkPhasterServer.py --submit --check \
+#     -i "${phaster}"/assemblies \
+#     -o "$phaster"
 
 # Run local version of phaster
 # /media/30tb_raid10/db/blast/prophages/prophage_virus_filtered_fixedheaders.db
-for i in $(find "${phaster}"/assemblies -type f -name "*.fasta"); do
-    sample=$(basename "$1" "_trimmed2000.fasta")
+for i in $(find "${phaster}"/"${assembler}"/assemblies -type f -name "*.fasta"); do
+    sample=$(basename "$1" ".fasta")
+    [ -d "${phaster}"/"${assembler}"/"$sample" ] || mkdir -p "${phaster}"/"${assembler}"/"$sample"
 
     perl /home/bioinfo/prog/phaster-app/scripts/phaster.pl \
         -c \
         -i "$i" \
-        -o "${phaster}"/"$sample"
+        -o "${phaster}"/"${assembler}"/"${sample}"/"$sample"
 done
+
+# Cleanup
+rm -rf "${phaster}"/"${assembler}"/assemblies
+
 
 #reformat phaster output
 function reformat_output ()
@@ -1266,67 +1576,109 @@ function reformat_output ()
         > "${1}"/detail.tsv
 }
 
-for i in $(find "$phaster" -mindepth 1 -type d ! -name assemblies); do
+for i in $(find "${phaster}"/"$assembler" -mindepth 1 -type d ! -name assemblies); do
     reformat_output "$i"
 done
 
+# Rename output file
+for i in $(find "${phaster}"/"$assembler" -type f -name "region_DNA.txt"); do
+    d=$(dirname "$i")
+    sample=$(basename "$d")
 
-#######
-# assemble metagenomic data
+    mv "$i" "${d}"/"${sample}"_phages.fasta
+done
 
-function assemble()
-{
-    sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
-
-    [ -d "${assemblies}"/flye_meta/"$sample" ] || mkdir -p "${assemblies}"/flye_meta/"$sample"
-
-    flye \
-        --meta \
-        --nano-raw "$1" \
-        --out-dir "${assemblies}"/flye_meta/"$sample" \
-        --genome-size "$size" \
-        --iterations 3 \
-        --threads $((cpu/maxProc))
-}
-
-export -f assemble
-
-find "${trimmed}"/to_assemble -type f -name "*.fastq.gz" \
-    | parallel  --bar \
-                --env cpu \
-                --env maxProc \
-                --env assemble \
-                --env assembler \
-                --env assemblies \
-                --env size \
-                --jobs "$maxProc" \
-                'assemble {} unicycler'
+#Add sample name and entry number to fasta header
+for i in $(find "${phaster}"/"$assembler" -name "*_phages.fasta"); do
+    sed -i "s/^>/>"${sample}"_/" "$i"
+done
 
 
-# Mapping to reference
-# end to end
-function map_bowtie2()
-{
-    sample=$(cut -d '_' -f 1 <<< $(basename "$2"))
 
-    bowtie2 \
-        --mm \
-        --very-sensitive \
-        --threads $((cpu/maxProc)) \
-        -x "$1" \
-        -U "$2" \
-    | samtools view -bh -F4 -@ $((cpu/maxProc)) - \
-    | samtools sort -@ $((cpu/maxProc)) - \
-    > "${baseDir}"/mapped/"${sample}".bam
 
-    samtools index "${baseDir}"/mapped/"${sample}".bam
-}
 
-export -f map_bowtie2
 
-find "${basecalled}"/pass -name "*.fastq.gz" \
-| parallel  --bar \
-            --env map_bowtie2 \
-            --env cpu \
-            --env maxProc \
-            map_bowtie2 /media/30tb_raid10/ref/crypto/Cryptosporidium_parvum_strain_Iowa_II {}
+
+
+
+
+
+
+# #######
+# # assemble metagenomic data
+
+# function meta_assemble()
+# {
+#     ass=flye_meta
+#     sample=$(cut -d "_" -f 1 <<< $(basename "$1"))
+
+#     [ -d "${assemblies}"/flye_meta/"$sample" ] || mkdir -p "${assemblies}"/flye_meta/"$sample"
+
+#     flye \
+#         --meta \
+#         --nano-raw "$1" \
+#         --out-dir "${assemblies}"/"${ass}"/"$sample" \
+#         --genome-size "$size" \
+#         --iterations 3 \
+#         --threads $((cpu/maxProc))
+
+#     # Rename assembly
+#     mv "${assemblies}"/"${ass}"/"${sample}"/assembly.fasta \
+#         "${assemblies}"/"${ass}"/"${sample}"/"${sample}".fasta
+
+#     mv "${assemblies}"/"${ass}"/"${sample}"/assembly_graph.gfa \
+#         "${assemblies}"/"${ass}"/"${sample}"/"${sample}".gfa
+
+#     # Maybe some cleanup
+#     find "${assemblies}"/"${ass}"/"$sample" -mindepth 1 -maxdepth 1 \
+#         ! -name "*.fasta" \
+#         ! -name "*.gfa" \
+#         ! -name "*.log" \
+#         ! -name "*.report" \
+#         -o -name "*unitigs*" \
+#         -exec rm -rf {} \;
+# }
+
+# export -f meta_assemble
+
+# find "${basecalled}"/pass -type f -name "*.fastq.gz" \
+#     | parallel  --bar \
+#                 --env cpu \
+#                 --env maxProc \
+#                 --env meta_assemble \
+#                 --env assembler \
+#                 --env assemblies \
+#                 --env size \
+#                 --jobs "$maxProc" \
+#                 'meta_assemble {}'
+
+
+# # Mapping to reference
+# # end to end
+# function map_bowtie2()
+# {
+#     sample=$(cut -d '_' -f 1 <<< $(basename "$2"))
+
+#     bowtie2 \
+#         --mm \
+#         --very-sensitive \
+#         --threads $((cpu/maxProc)) \
+#         -x "$1" \
+#         -U "$2" \
+#     | samtools view -bh -F4 -@ $((cpu/maxProc)) - \
+#     | samtools sort -@ $((cpu/maxProc)) - \
+#     > "${baseDir}"/mapped/"${sample}".bam
+
+#     samtools index "${baseDir}"/mapped/"${sample}".bam
+# }
+
+# export -f map_bowtie2
+
+# find "${basecalled}"/pass -name "*.fastq.gz" \
+# | parallel  --bar \
+#             --env map_bowtie2 \
+#             --env cpu \
+#             --env maxProc \
+#             map_bowtie2 /media/30tb_raid10/ref/crypto/Cryptosporidium_parvum_strain_Iowa_II {}
+
+
