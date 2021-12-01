@@ -7,7 +7,7 @@ mamba create -n prokka -c bioconda prokka parallel  # the prokka file needs to b
 mamba create --name rgi --channel conda-forge --channel bioconda --channel defaults rgi parallel -y
 mamba create -n quast -c bioconda quast parallel -y
 mamba create -n qualimap -c bioconda qualimap parallel samtools -y
-mamba create -n refseq_masher -c bioconda refseq_masher parallel -y
+mamba create -n refseq_masher -c bioconda refseq_masher parallel -y &&  pip install importlib-metadata
 
 # Install nanoQC
 mamba create -n nanoqc -c bioconda numpy python-dateutil cython pandas matplotlib seaborn parallel git -y
@@ -40,7 +40,7 @@ conda activate nanopore
 
 # User defined
 export baseDir=/home/bioinfo/anaylses/23-listeria_nanopore
-export data=/media/bioinfo/DATA/data/23-listeria_nanopore/fast5
+export data=/media/bioinfo/DATA1/data/23-listeria_nanopore/fast5
 export size=2850000
 export maxProc=6
 export kingdom=bacteria
@@ -85,7 +85,31 @@ export amr=""${baseDir}"/amr"
 [ -d "$amr" ] || mkdir -p "$amr"
 
 
+# Version logging
+echo -e "$(date)\n" | tee "${logs}"/log.txt
+echo -e "User: $(whoami)" | tee -a "${logs}"/log.txt
+echo -e "Processors: "$cpu"" | tee -a "${logs}"/log.txt
+echo -e "Memory: "$mem"G" | tee -a "${logs}"/log.txt
+
+java -version 2>&1 1>/dev/null | grep "java version" | tr -d '"' | tee -a "${logs}"/log.txt
+v=$(guppy_basecaller --version | rev | cut -d " " -f 1 | rev) && echo "Guppy v"${v}"" | tee -a "${logs}"/log.txt
+v=$(porechop --version) && echo "Porechop v"${v}"" | tee -a "${logs}"/log.txt
+filtlong --version | tee -a "${logs}"/log.txt
+v=$(flye --version) && echo "flye v"${v}"" | tee -a "${logs}"/log.txt
+v=$(circlator version) && echo "circlator v"${v}"" | tee -a "${logs}"/log.txt
+conda activate medaka && medaka --version | tee -a "${logs}"/log.txt && conda deactivate
+conda activate quast && quast --version | tee -a "${logs}"/log.txt && conda deactivate
+conda activate prokka && prokka --version | tee -a "${logs}"/log.txt && conda deactivate
+v=$(minimap2 --version 2>&1) && echo "minimap2 "$v"" | tee -a "${logs}"/log.txt
+samtools --version | grep -F 'samtools' | tee -a "${logs}"/log.txt
+conda activate qualimap && qualimap --version | grep -F "QualiMap" | tee -a "${logs}"/log.txt && conda deactivate
+conda activate refseq_masher && refseq_masher --version  | tee -a "${logs}"/log.txt && conda deactivate
+# Resfinder v4.1.5
+# nanoQC v0.2
+
+
 # Guppy Super accuracy basecalling
+# EXP-NBD114
 guppy_basecaller \
     -i $data \
     -s $basecalled \
@@ -99,7 +123,7 @@ guppy_basecaller \
     --disable_pings \
     --calib_detect \
     --compress_fastq \
-    --barcode_kits "EXP-NBD104 EXP-NBD114" \
+    --barcode_kits "EXP-NBD104" \
     --trim_barcodes \
     --num_barcode_threads 48
 
@@ -475,6 +499,39 @@ parallel    --bar \
 conda deactivate
 
 
+# ID samples
+conda activate refseq_masher
+
+
+function id_sample()
+{
+    sample=$(basename "$1" ".fasta")
+
+    #         --output "${qc}"/id/"${sample}".tsv \
+    refseq_masher matches \
+        --output-type "tab" \
+        -n 1 \
+        -m 1 \
+        $1 \
+    | sed -n 2p >> "${qc}"/id/refseq_masher_ids.tsv
+}
+
+export -f id_sample
+
+echo -e "sample\ttop_taxonomy_name\tdistance\tpvalue\tmatching\tfull_taxonomy\ttaxonomic_species\ttaxonomic_genus\ttaxonomic_family\ttaxonomic_order\ttaxonomic_class\ttaxonomic_phylum\ttaxonomic_superkingdom\tsubspecies\tserovar\tplasmid\tbioproject\tbiosample\ttaxid\tassembly_accession\tmatch_id" \
+    > "${qc}"/id/refseq_masher_ids.tsv
+
+
+[ -d "${qc}"/id ] || mkdir -p "${qc}"/id
+
+find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" \
+    | parallel    --bar \
+                --env id_sample \
+                --env qc \
+                "id_sample {}"
+
+conda deactivate
+
 
 # Annotate assemblies wit Prokka
 conda activate prokka
@@ -641,37 +698,4 @@ done
 
 rm "${amr}"/rgi/"${ass}"/rgi_merged.tsv.tmp
 
-conda deactivate
-
-# ID samples
-conda activate refseq_masher
-
-
-function id_sample()
-{
-    sample=$(basename "$1" ".fasta")
-
-    #         --output "${qc}"/id/"${sample}".tsv \
-    refseq_masher matches \
-        --output-type "tab" \
-        -n 1 \
-        -m 1 \
-        $1 \
-    | sed -n 2p >> "${qc}"/id/refseq_masher_ids.tsv
-}
-
-export -f id_sample
-
-echo -e "sample\ttop_taxonomy_name\tdistance\tpvalue\tmatching\tfull_taxonomy\ttaxonomic_species\ttaxonomic_genus\ttaxonomic_family\ttaxonomic_order\ttaxonomic_class\ttaxonomic_phylum\ttaxonomic_superkingdom\tsubspecies\tserovar\tplasmid\tbioproject\tbiosample\ttaxid\tassembly_accession\tmatch_id" \
-    > "${qc}"/id/refseq_masher_ids.tsv
-
-
-[ -d "${qc}"/id ] || mkdir -p "${qc}"/id
-
-find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" \
-    | parallel    --bar \
-                --env id_sample \
-                --env qc \
-                "id_sample {}"
-                
 conda deactivate
