@@ -237,7 +237,7 @@ function assemble_flye()
     [ -d "${qc}"/assembly_graphs/"${ass}" ] || mkdir -p "${qc}"/assembly_graphs/"${ass}"
 
     flye \
-        --nano-raw "$1" \
+        --nano-hq "$1" \
         --out-dir "${assemblies}"/"${ass}"/"$sample" \
         --genome-size "$size" \
         --iterations 3 \
