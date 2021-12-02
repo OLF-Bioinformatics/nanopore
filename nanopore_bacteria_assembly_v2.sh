@@ -18,6 +18,14 @@ git clone https://github.com/duceppemo/nanoQC.git
 cd nanoQC
 python setup.py build_ext --inplace
 
+# Install Guppy
+sudo apt-get update
+sudo apt-get install wget lsb-release
+export PLATFORM=$(lsb_release -cs)
+wget -O- https://mirror.oxfordnanoportal.com/apt/ont-repo.pub | sudo apt-key add -
+echo "deb http://mirror.oxfordnanoportal.com/apt ${PLATFORM}-stable non-free" | sudo tee /etc/apt/sources.list.d/nanoporetech.sources.list
+sudo apt-get update
+sudo apt install ont-guppy 
 
 # Install resfinder
 # https://bitbucket.org/genomicepidemiology/resfinder/src/master/
