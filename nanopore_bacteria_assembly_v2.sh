@@ -1,59 +1,88 @@
-conda install mamba -n base -c conda-forge
-mamba install -c conda-forge git
-mamba create -n nanopore -c bioconda filtlong porechop flye pilon parallel bandage blast circlator -y
+#!/bin/bash
+
+
+### TODO ###
+
+
+# Replace Prokka by PGAP
+
+
+
+### INSTALL ###
+
+
+# Set conda channels order
+conda config --add channels conda-forge
+conda config --add channels defaults
+conda config --add channels bioconda
+conda config --add channels r
+
+# Create all conda envrironments
+conda install mamba -n base -c conda-forge -y
+mamba install -n base -c conda-forge git -y
+mamba create -n nanopore -c bioconda filtlong porechop flye=2.9 pilon parallel bandage blast circlator -y
 mamba create -n qualimap -c bioconda qualimap parallel -y
-mamba create -n medaka -c conda-forge -c bioconda python=3.6 medaka parallel -y && conda activate medaka && pip install tensorflow==2.2.2
-mamba create -n prokka -c bioconda prokka parallel  # the prokka file needs to be changed for it to work. Blast versions. Also, signalp is not included and needed for Gram+
-mamba create --name rgi --channel conda-forge --channel bioconda --channel defaults rgi parallel -y
+mamba create -n medaka -c conda-forge -c bioconda medaka parallel -y
+# mamba create -n medaka -c conda-forge -c bioconda parallel -y && conda activate medaka && pip install medaka
+# mamba create -n medaka -c conda-forge -c bioconda python=3.6 medaka parallel -y && conda activate medaka && pip install tensorflow==2.2.2
+mamba create -n prokka -c bioconda prokka parallel -y  # the prokka file needs to be changed for it to work. Blast versions. Also, signalp is not included and needed for Gram+
+mamba create --name rgi -c conda-forge -c bioconda -c defaults rgi parallel -y
 mamba create -n quast -c bioconda quast parallel -y
 mamba create -n qualimap -c bioconda qualimap parallel samtools -y
-mamba create -n refseq_masher -c bioconda refseq_masher parallel -y &&  pip install importlib-metadata
+mamba create -n refseq_masher -c bioconda refseq_masher parallel -y && conda activate refseq_masher && pip install importlib-metadata && conda deactivate
+mamba create -n resfinder -c bioconda blast kma git parallel numpy -y && conda activate resfinder && pip install tabulate biopython cgecore gitpython python-dateutil && conda deactivate
+mamba create -n nanoQC -c bioconda numpy python-dateutil cython pandas matplotlib seaborn parallel git -y
 
-# Install nanoQC
-mamba create -n nanoqc -c bioconda numpy python-dateutil cython pandas matplotlib seaborn parallel git -y
-conda activte nanoqc
-[ -d $HOME/prog ] || mkdir -p $HOME/prog
-cd $HOME/prog
-git clone https://github.com/duceppemo/nanoQC.git
-cd nanoQC
-python setup.py build_ext --inplace
 
-# Install Guppy
-sudo apt-get update
-sudo apt-get install wget lsb-release
-export PLATFORM=$(lsb_release -cs)
-wget -O- https://mirror.oxfordnanoportal.com/apt/ont-repo.pub | sudo apt-key add -
-echo "deb http://mirror.oxfordnanoportal.com/apt ${PLATFORM}-stable non-free" | sudo tee /etc/apt/sources.list.d/nanoporetech.sources.list
-sudo apt-get update
-sudo apt install ont-guppy 
+# mamba create -n nanopore git filtlong porechop \
+#     flye=2.9 pilon parallel bandage blast circlator qualimap rgi quast qualimap \
+#     samtools refseq_masher numpy python-dateutil cython pandas matplotlib seaborn blast kma \
+#     cython pandas matplotlib seaborn -y && activate nanopore && pip install medaka && conda deactivate
+
+# Install PGAP
+
+
+
+
+# conda activate nanopore
+# mamba install -c conda-forge -c bioconda -c defaults rgi -y
+# pip install tabulate biopython cgecore gitpython python-dateutil #tensorflow==2.2.2
+
 
 # Install resfinder
 # https://bitbucket.org/genomicepidemiology/resfinder/src/master/
 [ -d $HOME/prog ] || mkdir -p $HOME/prog
 cd $HOME/prog
 git clone https://git@bitbucket.org/genomicepidemiology/resfinder.git
-mamba create -n resfinder -c bioconda blast kma git parallel numpy
-conda activate resfinder
-pip3 install tabulate biopython cgecore gitpython python-dateutil
-# cd resfinder/cge
-# git clone https://bitbucket.org/genomicepidemiology/kma.git
-# cd kma && make
-# cd ..
 git clone https://git@bitbucket.org/genomicepidemiology/resfinder_db.git db_resfinder
 cd resfinder/db_resfinder
+conda activate resfinder
 python3 INSTALL.py
+conda deactivate
+
+# Install nanoQC
+[ -d $HOME/prog ] || mkdir -p $HOME/prog
+cd $HOME/prog
+git clone https://github.com/duceppemo/nanoQC.git
+cd nanoQC
+conda activate nanoQC
+python setup.py build_ext --inplace
+conda deactivate
+
+
+### RUN ###
 
 
 conda activate nanopore
 
 # User defined
-export baseDir=/home/bioinfo/anaylses/23-listeria_nanopore
-export data=/media/bioinfo/DATA1/data/23-listeria_nanopore/fast5
-export size=2850000
+export baseDir=/home/bioinfo/anaylses/NPWGS-20190521
+export data=/media/bioinfo/DATA/data/NPWGS-20190521
+export size=4350000  # Mbovis: 4350000, Lmono: 2850000
 export maxProc=6
-export kingdom=bacteria
-export genus=Listeria
-export species=monocytogenes
+export kingdom=bacteria``
+export genus=Mycobacterium
+export species=bovis
 export gram=pos
 export locustag=XXX
 export centre=OLF
@@ -82,14 +111,12 @@ export amr=""${baseDir}"/amr"
 [ -d "$baseDir" ] || mkdir -p "$baseDir"
 [ -d "$logs" ] || mkdir -p "$logs"
 [ -d "$qc" ] || mkdir -p "$qc"
-[ -d "$fastq" ] || mkdir -p "$fastq"
 [ -d "$trimmed" ] || mkdir -p "$trimmed"
 [ -d "$filtered" ] || mkdir -p "$filtered"
 [ -d "$basecalled" ] || mkdir -p "$basecalled"
 [ -d "$assemblies" ] || mkdir -p "$assemblies"
 [ -d "$polished" ] || mkdir -p "$polished"
 [ -d "$annotation" ] || mkdir -p "$annotation"
-[ -d "$phaster" ] || mkdir -p "$phaster"
 [ -d "$amr" ] || mkdir -p "$amr"
 
 
@@ -97,7 +124,7 @@ export amr=""${baseDir}"/amr"
 echo -e "$(date)\n" | tee "${logs}"/log.txt
 echo -e "User: $(whoami)" | tee -a "${logs}"/log.txt
 echo -e "Processors: "$cpu"" | tee -a "${logs}"/log.txt
-echo -e "Memory: "$mem"G" | tee -a "${logs}"/log.txt
+echo -e "Memory: "$mem"G\n" | tee -a "${logs}"/log.txt
 
 java -version 2>&1 1>/dev/null | grep "java version" | tr -d '"' | tee -a "${logs}"/log.txt
 v=$(guppy_basecaller --version | rev | cut -d " " -f 1 | rev) && echo "Guppy v"${v}"" | tee -a "${logs}"/log.txt
@@ -112,8 +139,8 @@ v=$(minimap2 --version 2>&1) && echo "minimap2 "$v"" | tee -a "${logs}"/log.txt
 samtools --version | grep -F 'samtools' | tee -a "${logs}"/log.txt
 conda activate qualimap && qualimap --version | grep -F "QualiMap" | tee -a "${logs}"/log.txt && conda deactivate
 conda activate refseq_masher && refseq_masher --version  | tee -a "${logs}"/log.txt && conda deactivate
-# Resfinder v4.1.5
-# nanoQC v0.2
+echo "Resfinder v4.1.5" | tee -a "${logs}"/log.txt
+echo "nanoQC v0.2" | tee -a "${logs}"/log.txt
 
 
 # Guppy Super accuracy basecalling
@@ -133,7 +160,7 @@ guppy_basecaller \
     --compress_fastq \
     --barcode_kits "EXP-NBD104" \
     --trim_barcodes \
-    --num_barcode_threads 48
+    --num_barcode_threads 60
 
 
 # Merge the basecalled and demultiplexed fastq
@@ -151,11 +178,12 @@ done
 
 # QC on raw reads
 [ -d "${qc}"/nanoQC/raw/fastq ] || mkdir -p "${qc}"/nanoQC/raw/fastq
-conda activate nanoqc
+conda activate nanoQC
 python3 "${prog}"/nanoQC/nanoQC.py \
     -f "$basecalled" \
     -o "${qc}"/nanoQC/raw/fastq
 conda deactivate
+
 
 # Trim sequencing adapters
 function trim()
@@ -221,7 +249,7 @@ find "$trimmed" -type f -name "*_trimmed.fastq.gz" \
 
 # QC on filtered reads
 [ -d "${qc}"/nanoQC/raw/fastq ] || mkdir -p "${qc}"/nanoQC/raw/fastq
-conda activate nanoqc
+conda activate nanoQC
 python3 "${prog}"/nanoQC/nanoQC.py \
     -f "$filtered" \
     -o "${qc}"/nanoQC/filtered/fastq
@@ -378,6 +406,10 @@ find "${polished}"/"$ass" -type f -name "*.fasta" \
 find "${baseDir}"/fixstart/"$ass" -type f ! -name "*.fasta" ! -name "*.log" -exec rm {} \;
 
 
+# Polish with short reads if available
+# TODO
+
+
 # Quast
 conda activate quast
 
@@ -471,6 +503,7 @@ find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" | \
                 --jobs "$maxProc" \
                 "get_coverage {}"
 
+
 # Qualimap
 function run_qualimap()
 {
@@ -541,7 +574,10 @@ find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" \
 conda deactivate
 
 
-# Annotate assemblies wit Prokka
+# Annotate with PGAP
+
+
+# Annotate assemblies with Prokka
 conda activate prokka
 
 function annotate()
