@@ -76,8 +76,8 @@ conda deactivate
 conda activate nanopore
 
 # User defined
-export baseDir=/home/bioinfo/anaylses/NPWGS-20190521
-export data=/media/bioinfo/DATA/data/NPWGS-20190521
+export baseDir=/home/bioinfo/anaylses/NPWGS-20190521_A6000
+export data=//media/36tb/data/NPWGS-20190521
 export size=4350000  # Mbovis: 4350000, Lmono: 2850000
 export maxProc=6
 export kingdom=bacteria``
@@ -145,6 +145,8 @@ echo "nanoQC v0.2" | tee -a "${logs}"/log.txt
 
 # Guppy Super accuracy basecalling
 # EXP-NBD114
+# RTX A6000
+# Requires Guppy v6+
 guppy_basecaller \
     -i $data \
     -s $basecalled \
@@ -154,9 +156,13 @@ guppy_basecaller \
     --num_callers 4 \
     --gpu_runners_per_device 2 \
     --chunk_size 1000 \
-    --chunks_per_runner 128 \
+    --chunks_per_runner 512 \
     --disable_pings \
     --calib_detect \
+    --detect_barcodes \
+    --detect_adapter \
+    --detect_mid_strand_adapter \
+    --detect_mid_strand_barcodes \
     --compress_fastq \
     --barcode_kits "EXP-NBD104" \
     --trim_barcodes \
