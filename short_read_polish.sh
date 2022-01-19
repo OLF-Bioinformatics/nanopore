@@ -1,31 +1,19 @@
+#!/bin bash
+
+
+# Activate conda environment
+conda activate nanopore
+
+
+###############
+#
+#   Installation, once
+#
+###############
+
+
 # Install fastp
 mamba install -c bioconda fastp 
-
-
-# Pre-process short reads
-function trim()
-{
-    sample=$(basename "$1" | cut -d "_" -f 1)
-    r1="$1"
-    r2=$(echo "$r1" | sed 's/_R1/_R2/')
-
-    fastp \
-        --in1 "$r1" \
-        --in2 "$r2" \
-        --out1 "${r1%.fastq.gz}"_trimmed.fastq.gz \
-        --out2 "${r2%.fastq.gz}"_trimmed.fastq.gz \
-        --detect_adapter_for_pe \
-        --cut_right \
-        --cut_right_mean_quality 10 \
-        --length_required 64 \
-        --html /home/bioinfo/anaylses/NPWGS-20190521/illumina_trimmed/"${sample}".html \
-        --thread 64
-}
-
-export -f trim
-
-find /home/bioinfo/anaylses/NPWGS-20190521/illumina -name "*_R1.fastq.gz" | \
-parallel --jobs 2 --bar trim {}
 
 
 # Install NextPolish
@@ -48,6 +36,82 @@ cargo build --release
 mamba install -c bioocnda ntedit -y
 
 
+###############
+#
+#   Data
+#
+###############
+
+
+# Folders
+export fastq=/media/36tb/data/hongsheng_listeria/illumina/Listeria_Amit
+export trimmed_illumina=/home/bioinfo/anaylses/GTA_listeria/trimmed_illumina
+export genome_folder=/home/bioinfo/anaylses/GTA_listeria/polished
+export polished_illumina=/home/bioinfo/anaylses/GTA_listeria/polished_illumina
+
+# Create output folder
+[ -d "$trimmed_illumina" ] || mkdir -p "$trimmed_illumina"
+[ -d "$polished_illumina" ] || mkdir -p "$polished_illumina"
+
+
+###############
+#
+#   Resources
+#
+###############
+
+
+# Performance
+export cpu=$((cpu/maxProc))
+export maxProc=6
+
+
+###############
+#
+#   Trim
+#
+###############
+
+
+# Pre-process short reads
+function trim()
+{
+    sample=$(basename "$1" | cut -d "_" -f 1)
+    r1="$1"
+    r2=$(echo "$r1" | sed 's/_R1/_R2/')
+
+    fastp \
+        --in1 "$r1" \
+        --in2 "$r2" \
+        --out1 "${trimmed_illumina}"/"${sample}"_trimmed_R1.fastq.gz \
+        --out2 "${trimmed_illumina}"/"${sample}"_trimmed_R2.fastq.gz \
+        --detect_adapter_for_pe \
+        --cut_right \
+        --cut_right_mean_quality 10 \
+        --length_required 64 \
+        --html "${trimmed_illumina}"/"${sample}".html \
+        --thread $((cpu/maxProc))
+}
+
+export -f trim
+
+find "$fastq" -name "*_R1*.fastq.gz" | \
+parallel    --bar \
+            --env trim \
+            --env cpu \
+            --env trimmed_illumina \
+            --env maxProc \
+            --jobs $maxProc \
+            trim {}
+
+
+###############
+#
+#   Polish
+#
+###############
+
+
 function run_nextpolish()
 {
     genome="$1"
@@ -62,14 +126,14 @@ function run_nextpolish()
     bwa index "$genome"
 
     # Map reads
-    bwa mem -t $(nproc) "$genome" "$r1" "$r2" | \
-    samtools view -@ $(nproc) -F 0x4 -b - | \
-    samtools fixmate -@ $(nproc) -m - - | \
-    samtools sort -@ $(nproc) -m 4g - | \
-    samtools markdup -@ $(nproc) -r - "${out}"/"${sample}".bam
+    bwa mem -t $((cpu/maxProc)) "$genome" "$r1" "$r2" | \
+    samtools view -@ $((cpu/maxProc)) -F 0x4 -b - | \
+    samtools fixmate -@ $((cpu/maxProc)) -m - - | \
+    samtools sort -@ $((cpu/maxProc)) -m 4g - | \
+    samtools markdup -@ $((cpu/maxProc)) -r - "${out}"/"${sample}".bam
 
     # Index bam file
-    samtools index -@ $(nproc) "${out}"/"${sample}".bam
+    samtools index -@ $((cpu/maxProc)) "${out}"/"${sample}".bam
     
     # Index genome for NextPolish
     samtools faidx "$genome"
@@ -78,7 +142,7 @@ function run_nextpolish()
     python $HOME/prog/NextPolish/lib/nextpolish1.py \
         --genome "$genome" \
         --task 1 \
-        --process $(nproc) \
+        --process $((cpu/maxProc)) \
         --bam_sgs "${out}"/"${sample}".bam \
         -ploidy 1 \
         > "${out}"/"${sample}".nextpolish.fasta
@@ -115,7 +179,7 @@ function run_ntedit()
 
     # Polish
     nthits \
-        -t $(nproc) \
+        -t $((cpu/maxProc)) \
         -k 40 \
         -p "${out}"/"${sample}" \
         --outbloom \
@@ -123,7 +187,7 @@ function run_ntedit()
         "$r1" "$r2"
 
     ntedit \
-        -t $(nproc) \
+        -t $((cpu/maxProc)) \
         -f "$genome" \
         -b "${out}"/"${sample}" \
         -r "${out}"/"${sample}"_k40.bf \
@@ -202,12 +266,12 @@ function rename_fasta_headers()
 
 function polish()
 {
-    genome="$1"
-    r1="$2"
-    r2="$3"
-    out="$4"
+    sample=$(basename "$1" | cut -d "_" -f 1)
 
-    sample=$(basename "$r1" | cut -d "_" -f 1)
+    genome="$1"
+    r1="${trimmed_illumina}"/"${sample}"_trimmed_R1.fastq.gz
+    r2="${trimmed_illumina}"/"${sample}"_trimmed_R2.fastq.gz \
+    out="$polished_illumina"
 
 
     ### NextPolish ###
@@ -237,19 +301,19 @@ function polish()
 function short_read_coverage()
 {
     genome="$1"
-    r1="$2"
-    r2="$3"
-    out="$4"
+    r1="${trimmed_illumina}"/"${sample}"_trimmed_R1.fastq.gz
+    r2="${trimmed_illumina}"/"${sample}"_trimmed_R2.fastq.gz \
+    out="$polished_illumina"
 
     sample=$(basename "$r1" | cut -d "_" -f 1)
 
     bwa index "$genome"
 
-    bwa mem -t $(nproc) "$genome" "$r1" "$r2" | \
-    samtools view -@ $(nproc) -F 0x4 -b - | \
-    samtools fixmate -@ $(nproc) -m - - | \
-    samtools sort -@ $(nproc) -m 4g - | \
-    samtools markdup -@ $(nproc) -r - "${out}"/"${sample}".bam
+    bwa mem -t $((cpu/maxProc)) "$genome" "$r1" "$r2" | \
+    samtools view -@ $((cpu/maxProc)) -F 0x4 -b - | \
+    samtools fixmate -@ $((cpu/maxProc)) -m - - | \
+    samtools sort -@ $((cpu/maxProc)) -m 4g - | \
+    samtools markdup -@ $((cpu/maxProc)) -r - "${out}"/"${sample}".bam
 
     cov=$(samtools depth "${out}"/"${sample}".bam | awk '{sum+=$3} END {print sum/NR}')
     printf "%s\t%.*f\n" "$sample" 0 "$cov" | tee -a "${out}"/short_reads_coverage.tsv
@@ -263,9 +327,14 @@ function short_read_coverage()
         "${out}"/"${sample}"*.bam
 }
 
-genome=/home/bioinfo/anaylses/NPWGS-20190521/short_read_polish/MBWGS204.fasta
-r1=/home/bioinfo/anaylses/NPWGS-20190521/illumina/MBWGS204_R1_trimmed.fastq.gz
-r2=/home/bioinfo/anaylses/NPWGS-20190521/illumina/MBWGS204_R2_trimmed.fastq.gz
-out=/home/bioinfo/anaylses/NPWGS-20190521/short_read_polish
 
-polish "$genome" "$r1" "$r2" "$out"
+function trim()
+{
+    sample=$(basename "$1" | cut -d "_" -f 1)
+    r1="$1"
+    r2=$(echo "$r1" | sed 's/_R1/_R2/')
+
+
+for i in $(find "$genome_folder" -type f -name "*.fasta"); do
+    polish "$genome"
+done
