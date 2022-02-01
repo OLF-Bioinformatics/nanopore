@@ -62,8 +62,8 @@ export polished_illumina=/home/bioinfo/anaylses/GTA_listeria/polished_illumina
 
 
 # Performance
-export cpu=$((cpu/maxProc))
-export maxProc=6
+export cpu=$(nproc)
+export maxProc=1
 
 
 ###############
@@ -328,13 +328,9 @@ function short_read_coverage()
 }
 
 
-function trim()
-{
-    sample=$(basename "$1" | cut -d "_" -f 1)
-    r1="$1"
-    r2=$(echo "$r1" | sed 's/_R1/_R2/')
 
 
+# Polish
 for i in $(find "$genome_folder" -type f -name "*.fasta"); do
-    polish "$genome"
+    polish "$i"
 done
