@@ -76,20 +76,22 @@ conda deactivate
 conda activate nanopore
 
 # User defined
-export baseDir=/home/bioinfo/anaylses/NPWGS-20190521_A6000
-export data=//media/36tb/data/NPWGS-20190521
-export size=4350000  # Mbovis: 4350000, Lmono: 2850000
-export maxProc=6
-export kingdom=bacteria``
-export genus=Mycobacterium
-export species=bovis
+export baseDir=/home/bioinfo/anaylses/23-listeria_nanopore
+export data=/media/36tb/data/guillaume/advanced_prescreening/ITS/fast5
+bc_desc=/media/36tb/data/guillaume/advanced_prescreening/ITS/barcodes.txt
+
+export size=2850000 # Pseudomonas syringae: 5630000, Mbovis: 4350000, Lmono: 2850000
+export kingdom=bacteria
+export genus=Listeria
+export species=monocytogenes
 export gram=pos
 export locustag=XXX
 export centre=OLF
 
+export ass=flye
 
 export cpu=$(nproc)
-export ass=flye
+export maxProc=6
 export prog=$HOME/prog
 export scripts=$HOME/scripts
 export mem=$(($(grep MemTotal /proc/meminfo | awk '{print $2}')*85/100000000)) #85% of total memory in GB
@@ -97,7 +99,6 @@ export memJava="-Xmx"$mem"g"
 
 export logs=""${baseDir}"/logs"
 export qc=""${baseDir}"/qc"
-export fastq=""${baseDir}"/fastq"
 export trimmed=""${baseDir}"/trimmed"
 export filtered=""${baseDir}"/filtered"
 export basecalled=""${baseDir}"/basecalled_sup"
@@ -141,10 +142,13 @@ conda activate qualimap && qualimap --version | grep -F "QualiMap" | tee -a "${l
 conda activate refseq_masher && refseq_masher --version  | tee -a "${logs}"/log.txt && conda deactivate
 echo "Resfinder v4.1.5" | tee -a "${logs}"/log.txt
 echo "nanoQC v0.2" | tee -a "${logs}"/log.txt
+python "${prog}"/pgap.py --version | tee -a "${logs}"/log.txt
 
 
 # Guppy Super accuracy basecalling
+# EXP-NBD104
 # EXP-NBD114
+# EXP-PBC001
 # RTX A6000
 # Requires Guppy v6+
 guppy_basecaller \
@@ -161,12 +165,11 @@ guppy_basecaller \
     --calib_detect \
     --detect_barcodes \
     --detect_adapter \
-    --detect_mid_strand_adapter \
-    --detect_mid_strand_barcodes \
     --compress_fastq \
-    --barcode_kits "EXP-NBD104" \
     --trim_barcodes \
-    --num_barcode_threads 60
+    --num_barcode_threads 60 \
+    --barcode_kits "EXP-PBC001"
+    
 
 
 # Merge the basecalled and demultiplexed fastq
@@ -180,6 +183,48 @@ for i in $(find "$basecalled" -mindepth 2 -maxdepth 2 -type d); do  # pass and f
     # # Remove non compressed files
     find "$i" -type f -name "*fastq_runid_*" -exec rm {} \;
 done
+
+# Rename files
+declare -A myArray=()
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(sed -e 's/ /\t/' -e 's/\r//g' -e 's/\n//g' <<< "$line")" #transform the space output field separator from read into tabs, remove carriage return
+    key="$(cut -f 1 <<< "$line")"
+    value="$(cut -f 2 <<< "$line")"
+    myArray["${key}"]="${value}"
+done < "$bc_desc"
+
+find "${basecalled}"/ -type f -name "*_pass*" -o -name "*_fail*" | while read i; do
+    # echo "$i"
+    pathPart="$(dirname "$i")"
+    # echo "$pathPart"
+    oldName="$(basename "$i")"
+    # echo "$oldName"
+
+    #for each file, check if a part of the name matches on
+    for j in "${!myArray[@]}"; do
+        # echo "$j"
+        if [ "$(echo "$oldName" | grep "$j")" ]; then
+            newName="$(echo "$oldName" | sed "s/"$j"/"${myArray["$j"]}"/")"
+            fullNewName=""${pathPart}"/"${newName}""
+
+            if [ -e "$rename" ]; then
+                echo "Cannot rename "$oldName" to "$newName", file already exists. Skipping"
+                continue
+                # exit 1
+            fi
+
+            echo ""$i" -> "$fullNewName""
+            mv "$i" "$fullNewName"
+        fi
+        if [ "$(echo "$pathPart" | grep "$j")" ]; then
+            # rename folder too
+            echo ""$pathPart" -> $(dirname "$pathPart")/"${myArray["$j"]}""
+            mv $pathPart $(dirname "$pathPart")/"${myArray["$j"]}"
+        fi
+    done
+done
+
 
 
 # QC on raw reads
@@ -379,6 +424,16 @@ find "${assemblies}"/"$ass" -maxdepth 2 -type f -name "*.fasta" \
 conda deactivate
 
 
+
+
+
+
+# Polish with short reads if available
+# TODO
+
+
+
+
 # fixstart
 function fix_start()
 {
@@ -410,10 +465,6 @@ find "${polished}"/"$ass" -type f -name "*.fasta" \
 
 # cleanup
 find "${baseDir}"/fixstart/"$ass" -type f ! -name "*.fasta" ! -name "*.log" -exec rm {} \;
-
-
-# Polish with short reads if available
-# TODO
 
 
 # Quast
@@ -464,7 +515,6 @@ conda deactivate
 
 
 # Coverage
-conda activate qualimap
 
 function get_coverage()  # unsing unmerged reads only
 {
@@ -511,6 +561,9 @@ find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" | \
 
 
 # Qualimap
+
+conda activate qualimap
+
 function run_qualimap()
 {
     sample=$(basename "$1" ".bam")
@@ -549,7 +602,6 @@ conda deactivate
 # ID samples
 conda activate refseq_masher
 
-
 function id_sample()
 {
     sample=$(basename "$1" ".fasta")
@@ -581,6 +633,62 @@ conda deactivate
 
 
 # Annotate with PGAP
+# v2021-11-29.build5742
+# Create input yaml file
+[ -d "${annotation}"/pgap ] || mkdir -p "${annotation}"/pgap
+
+function annotate_pgap()
+{
+    sample=$(basename "$1" ".fasta")
+    file_name=$(basename "$1")
+
+    input_dir=$(dirname "$1")
+    out_dir="${annotation}"/pgap/"$sample"
+
+    input_yaml="${sample}"_inputs.yaml
+    metadata_yaml="${sample}"_metadata.yaml
+
+    cd "${annotation}"/pgap
+
+    # 3 files (1 fasta and 2 yaml) need to be in same folder
+    cp "$1" "${annotation}"/pgap
+
+    # Create yaml file for input files
+    echo -n "\
+fasta: 
+    class: File
+    location: "$file_name"
+submol:
+    class: File
+    location: "$metadata_yaml"
+" > "$input_yaml"
+
+    # Create yaml file for sample metadata
+    echo -n "\
+organism:
+    genus_species: '"$genus" "$species"'
+    strain: 'my_strain'
+" > "$metadata_yaml"
+
+    
+    # Run PGAP
+    python "${prog}"/pgap.py \
+        --no-self-update \
+        --report-usage-false \
+        --cpus "$cpu" \
+        --memory "${mem}"g \
+        --output "$out_dir" \
+        "$input_yaml"
+
+    # Cleanup?
+    # rm "${annotation}"/pgap/"$file_name"
+}
+
+export -f annotate_pgap
+
+for i in $(find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" ); do
+    annotate_pgap "$i"
+done
 
 
 # Annotate assemblies with Prokka
