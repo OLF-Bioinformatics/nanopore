@@ -76,9 +76,9 @@ conda deactivate
 conda activate nanopore
 
 # User defined
-export baseDir=/home/bioinfo/anaylses/23-listeria_nanopore
-export data=/media/36tb/data/guillaume/advanced_prescreening/ITS/fast5
-bc_desc=/media/36tb/data/guillaume/advanced_prescreening/ITS/barcodes.txt
+export baseDir=/home/bioinfo/anaylses/meta2_AMR
+export data=/media/36tb/data/food_amr_nanopore/meta2_AMR/fast5
+bc_desc=/media/36tb/data/food_amr_nanopore/meta2_AMR/bc.txt
 
 export size=2850000 # Pseudomonas syringae: 5630000, Mbovis: 4350000, Lmono: 2850000
 export kingdom=bacteria
@@ -168,7 +168,7 @@ guppy_basecaller \
     --compress_fastq \
     --trim_barcodes \
     --num_barcode_threads 60 \
-    --barcode_kits "EXP-PBC001"
+    --barcode_kits "EXP-NBD104"
     
 
 
