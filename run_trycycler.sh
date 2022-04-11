@@ -129,7 +129,7 @@ POLISH_CONTIGS=true
 " > "${2}"/"${sample}"_necat.cfg
 
     cd "$2"
-    
+
     necat correct \
         "${2}"/"${sample}"_necat.cfg
 
@@ -180,7 +180,7 @@ trycycler cluster \
     --assemblies "${out}"/assemblies/*.fasta \
     --reads "$long" \
     --out_dir "${out}"/clusters \
-    2>&1 | tee "${out}"/logs/cluster_"$c".cluster.log
+    2>&1 | tee "${out}"/logs/cluster.log
 
 
 # Manual inspection of cluster required
