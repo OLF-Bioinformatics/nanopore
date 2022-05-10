@@ -1,14 +1,7 @@
 #!/bin/bash
 
 
-### TODO ###
-
-
-# Replace Prokka by PGAP
-
-
-
-### INSTALL ###
+##########################   Start of installation procedure - only needed once   ##########################
 
 
 # Set conda channels order
@@ -41,9 +34,6 @@ mamba create -n nanoQC -c bioconda numpy python-dateutil cython pandas matplotli
 
 # Install PGAP
 
-
-
-
 # conda activate nanopore
 # mamba install -c conda-forge -c bioconda -c defaults rgi -y
 # pip install tabulate biopython cgecore gitpython python-dateutil #tensorflow==2.2.2
@@ -70,45 +60,72 @@ python setup.py build_ext --inplace
 conda deactivate
 
 
-### RUN ###
+##########################   End of installation procedure - only needed once   ##########################
 
 
+
+#################################   Start of User defined variables   #################################
+
+
+# Activate required conda environment
 conda activate nanopore
 
-# User defined
-export baseDir=/home/bioinfo/anaylses/meta2_AMR
-export data=/media/36tb/data/food_amr_nanopore/meta2_AMR/fast5
-bc_desc=/media/36tb/data/food_amr_nanopore/meta2_AMR/bc.txt
 
-export size=2850000 # Pseudomonas syringae: 5630000, Mbovis: 4350000, Lmono: 2850000
+# Inputs
+export baseDir=/home/bioinfo/analyses/mbovis_nanopore/NPWGS_20211214_OA
+export data=/media/36tb/data/Mbovis/nanopore/NPWGS_20211214_OA
+bc_desc=/media/36tb/data/Mbovis/nanopore/NPWGS_20211214_OA/bc.txt  # Leave empty if not barcodes used
+samp=Test  # Only used to rename sample if no barcodes used
+
+# Guppy config file
+nano_config=dna_r9.4.1_450bps_sup.cfg  # dna_r9.4.1_450bps_sup.cfg; dna_r10.3_450bps_sup.cfg
+
+# Medaka model file
+export medaka_model=r941_min_sup_g507  # r941_min_hac_g507; 
+
+# Parallel execution
+export maxProc=4  # Set according to number of samples  in run and CPU available
+
+# Sample info
+export size=4350000 # Pseudomonas syringae: 5630000, Mbovis: 4350000, Lmono: 2850000 # Salmonella: 4850000; Stagonospora: 37000000
 export kingdom=bacteria
-export genus=Listeria
-export species=monocytogenes
-export gram=pos
+export genus=Mycobactrium  # Salmonella
+export species=bovis  # enterica
+export gram=pos  # neg
 export locustag=XXX
 export centre=OLF
 
-export ass=flye
+# Assembler [flye, shasta]
+export ass=flye  # shasta
+export reads_min_overlap=1000  # only for flye;
+export reads_min_len=1000  # only for shasta
 
+# Annotation [prokka, pgap]
+export annotator=prokka
+
+#################################   End of User defined variables   #################################
+
+
+# Performance
 export cpu=$(nproc)
-export maxProc=6
 export prog=$HOME/prog
 export scripts=$HOME/scripts
 export mem=$(($(grep MemTotal /proc/meminfo | awk '{print $2}')*85/100000000)) #85% of total memory in GB
 export memJava="-Xmx"$mem"g"
 
+# Folder structure
 export logs=""${baseDir}"/logs"
 export qc=""${baseDir}"/qc"
 export trimmed=""${baseDir}"/trimmed"
 export filtered=""${baseDir}"/filtered"
-export basecalled=""${baseDir}"/basecalled_sup"
+export basecalled=""${baseDir}"/basecalled"
 export assemblies=""${baseDir}"/assemblies"
-export polished=""${baseDir}"/polished"
+export polished_medaka=""${baseDir}"/polished_medaka"
 export annotation=""${baseDir}"/annotation"
 export phaster=""${baseDir}"/phaster"
 export amr=""${baseDir}"/amr"
 
-
+# Create folders
 [ -d "$baseDir" ] || mkdir -p "$baseDir"
 [ -d "$logs" ] || mkdir -p "$logs"
 [ -d "$qc" ] || mkdir -p "$qc"
@@ -116,19 +133,26 @@ export amr=""${baseDir}"/amr"
 [ -d "$filtered" ] || mkdir -p "$filtered"
 [ -d "$basecalled" ] || mkdir -p "$basecalled"
 [ -d "$assemblies" ] || mkdir -p "$assemblies"
-[ -d "$polished" ] || mkdir -p "$polished"
+[ -d "$polished_medaka" ] || mkdir -p "$polished_medaka"
 [ -d "$annotation" ] || mkdir -p "$annotation"
 [ -d "$amr" ] || mkdir -p "$amr"
 
 
-# Version logging
+##############
+#
+# Log
+#
+##############
+
+
+# Log software versions
 echo -e "$(date)\n" | tee "${logs}"/log.txt
 echo -e "User: $(whoami)" | tee -a "${logs}"/log.txt
 echo -e "Processors: "$cpu"" | tee -a "${logs}"/log.txt
 echo -e "Memory: "$mem"G\n" | tee -a "${logs}"/log.txt
 
 java -version 2>&1 1>/dev/null | grep "java version" | tr -d '"' | tee -a "${logs}"/log.txt
-v=$(guppy_basecaller --version | rev | cut -d " " -f 1 | rev) && echo "Guppy v"${v}"" | tee -a "${logs}"/log.txt
+v=$(guppy_basecaller --version | grep "Version" | cut -d "+" -f 1 | rev | cut -d " " -f 1 | rev) && echo "Guppy v"${v}"" | tee -a "${logs}"/log.txt
 v=$(porechop --version) && echo "Porechop v"${v}"" | tee -a "${logs}"/log.txt
 filtlong --version | tee -a "${logs}"/log.txt
 v=$(flye --version) && echo "flye v"${v}"" | tee -a "${logs}"/log.txt
@@ -145,85 +169,173 @@ echo "nanoQC v0.2" | tee -a "${logs}"/log.txt
 python "${prog}"/pgap.py --version | tee -a "${logs}"/log.txt
 
 
-# Guppy Super accuracy basecalling
-# EXP-NBD104
-# EXP-NBD114
-# EXP-PBC001
-# RTX A6000
-# Requires Guppy v6+
-guppy_basecaller \
-    -i $data \
-    -s $basecalled \
-    -c dna_r9.4.1_450bps_sup.cfg \
-    --recursive \
-    -x 'cuda:0' \
-    --num_callers 4 \
-    --gpu_runners_per_device 2 \
-    --chunk_size 1000 \
-    --chunks_per_runner 512 \
-    --disable_pings \
-    --calib_detect \
-    --detect_barcodes \
-    --detect_adapter \
-    --compress_fastq \
-    --trim_barcodes \
-    --num_barcode_threads 60 \
-    --barcode_kits "EXP-NBD104"
-    
+##############
+#
+# Basecalling
+#
+##############
 
 
-# Merge the basecalled and demultiplexed fastq
-for i in $(find "$basecalled" -mindepth 2 -maxdepth 2 -type d); do  # pass and fail
-    barcode=$(basename "$i")
-    flag=$(basename $(dirname "$i"))
-    # echo "${i}"/"${barcode}"_"${flag}".fastq.gz
-    # cat "${i}"/*.fastq.gz > "${i}"/"${barcode}"_"${flag}".fastq.gz  #bash: /bin/cat: Argument list too long
-    find "$i" -mindepth 1 -maxdepth 1 -type f -name "*.fastq.gz" -name "fastq_runid_*" \
-        -exec cat {} \; > "${i}"/"${barcode}"_"${flag}".fastq.gz
-    # # Remove non compressed files
-    find "$i" -type f -name "*fastq_runid_*" -exec rm {} \;
-done
+# Basecall and rename samples
+if [ -z "$bc_desc" ]; then  # if no barcodes
+    # Guppy Super accuracy basecalling
+    # EXP-NBD104
+    # EXP-NBD114
+    # EXP-PBC001
+    # RTX A6000
 
-# Rename files
-declare -A myArray=()
+    # configs
+    # dna_r9.4.1_450bps_sup.cfg
+    # dna_r10.3_450bps_sup.cfg
 
-while IFS= read -r line || [[ -n "$line" ]]; do
-    line="$(sed -e 's/ /\t/' -e 's/\r//g' -e 's/\n//g' <<< "$line")" #transform the space output field separator from read into tabs, remove carriage return
-    key="$(cut -f 1 <<< "$line")"
-    value="$(cut -f 2 <<< "$line")"
-    myArray["${key}"]="${value}"
-done < "$bc_desc"
+    # Requires Guppy v6+
 
-find "${basecalled}"/ -type f -name "*_pass*" -o -name "*_fail*" | while read i; do
-    # echo "$i"
-    pathPart="$(dirname "$i")"
-    # echo "$pathPart"
-    oldName="$(basename "$i")"
-    # echo "$oldName"
+    # --detect_primer
+    # --trim_primers
+    # --detect_mid_strand_adapter
+    guppy_basecaller \
+        --input_path $data \
+        --save_path $basecalled \
+        --config "$nano_config" \
+        --recursive \
+        --device 'cuda:0' \
+        --num_callers 4 \
+        --gpu_runners_per_device 2 \
+        --chunk_size 1000 \
+        --chunks_per_runner 512 \
+        --disable_pings \
+        --calib_detect \
+        --compress_fastq \
+        --detect_adapter \
+        --trim_adapters \
 
-    #for each file, check if a part of the name matches on
-    for j in "${!myArray[@]}"; do
-        # echo "$j"
-        if [ "$(echo "$oldName" | grep "$j")" ]; then
-            newName="$(echo "$oldName" | sed "s/"$j"/"${myArray["$j"]}"/")"
-            fullNewName=""${pathPart}"/"${newName}""
+    # remove calibration strands, if presents
+    [ -d "${basecalled}"/calibration_strands ] && rm -rf "${basecalled}"/calibration_strands
 
-            if [ -e "$rename" ]; then
-                echo "Cannot rename "$oldName" to "$newName", file already exists. Skipping"
-                continue
-                # exit 1
-            fi
+    # Merge the basecalled and demultiplexed fastq
+    for i in $(find "$basecalled" -mindepth 1 -maxdepth 1 -type d); do  # pass and fail
+        flag=$(basename "$i")
 
-            echo ""$i" -> "$fullNewName""
-            mv "$i" "$fullNewName"
-        fi
-        if [ "$(echo "$pathPart" | grep "$j")" ]; then
-            # rename folder too
-            echo ""$pathPart" -> $(dirname "$pathPart")/"${myArray["$j"]}""
-            mv $pathPart $(dirname "$pathPart")/"${myArray["$j"]}"
-        fi
+        find "$i" -mindepth 1 -maxdepth 1 -type f -name "*.fastq.gz" -name "fastq_runid_*" \
+            -exec cat {} \; > "${i}"/"${samp}"_"${flag}".fastq.gz
+        # # Remove non compressed files
+        find "$i" -type f -name "*fastq_runid_*" -exec rm {} \;
     done
-done
+else  # if barcodes
+    # Guppy Super accuracy basecalling
+    # EXP-NBD103 (older)
+    # EXP-NBD104
+    # EXP-NBD114
+    # EXP-PBC001
+    # RTX A6000
+
+    # configs
+    # dna_r9.4.1_450bps_sup.cfg
+    # dna_r10.3_450bps_sup.cfg
+
+    # Requires Guppy v6+
+
+    # --detect_primer
+    # --trim_primers
+    # --detect_mid_strand_adapter
+    guppy_basecaller \
+        --input_path $data \
+        --save_path $basecalled \
+        --config "$nano_config" \
+        --recursive \
+        --device 'cuda:0' \
+        --num_callers 4 \
+        --gpu_runners_per_device 2 \
+        --chunk_size 1000 \
+        --chunks_per_runner 512 \
+        --disable_pings \
+        --calib_detect \
+        --compress_fastq \
+        --detect_adapter \
+        --trim_adapters \
+        --detect_barcodes \
+        --trim_barcodes \
+        --barcode_kits "EXP-NBD104"
+
+    # Only hac available with this workflow for olf R10 flowcells
+    # guppy_basecaller \
+    #     --input_path $data \
+    #     --save_path $basecalled \
+    #     --flowcell "FLO-MIN106" \
+    #     --kit "SQK-LSK108" \
+    #     --recursive \
+    #     --device 'cuda:0' \
+    #     --num_callers 4 \
+    #     --gpu_runners_per_device 4 \
+    #     --chunk_size 3000 \
+    #     --chunks_per_runner 1000 \
+    #     --disable_pings \
+    #     --calib_detect \
+    #     --compress_fastq \
+    #     --detect_adapter \
+    #     --trim_adapters \
+    #     --detect_barcodes \
+    #     --trim_barcodes \
+    #     --barcode_kits "EXP-NBD103"
+
+    # remove calibration strands, if presents
+    [ -d "${basecalled}"/calibration_strands ] && rm -rf "${basecalled}"/calibration_strands
+
+    # Merge the basecalled and demultiplexed fastq
+    for i in $(find "$basecalled" -mindepth 2 -maxdepth 2 -type d); do  # pass and fail
+        barcode=$(basename "$i")
+        flag=$(basename $(dirname "$i"))
+
+        find "$i" -mindepth 1 -maxdepth 1 -type f -name "*.fastq.gz" -name "fastq_runid_*" \
+            -exec cat {} \; > "${i}"/"${barcode}"_"${flag}".fastq.gz
+        # # Remove non compressed files
+        find "$i" -type f -name "*fastq_runid_*" -exec rm {} \;
+    done
+
+    # Rename files
+    declare -A myArray=()
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="$(sed -e 's/ /\t/' -e 's/\r//g' -e 's/\n//g' <<< "$line")" #transform the space output field separator from read into tabs, remove carriage return
+        key="$(cut -f 1 <<< "$line")"
+        value="$(cut -f 2 <<< "$line")"
+        myArray["${key}"]="${value}"
+    done < "$bc_desc"
+
+    find "${basecalled}"/ -type f -name "*_pass*" -o -name "*_fail*" | while read i; do
+        # echo "$i"
+        pathPart="$(dirname "$i")"
+        # echo "$pathPart"
+        oldName="$(basename "$i")"
+        # echo "$oldName"
+
+        #for each file, check if a part of the name matches on
+        for j in "${!myArray[@]}"; do
+            # echo "$j"
+            if [ "$(echo "$oldName" | grep "$j")" ]; then
+                newName="$(echo "$oldName" | sed "s/"$j"/"${myArray["$j"]}"/")"
+                fullNewName=""${pathPart}"/"${newName}""
+
+                if [ -e "$rename" ]; then
+                    echo "Cannot rename "$oldName" to "$newName", file already exists. Skipping"
+                    continue
+                    # exit 1
+                fi
+
+                echo ""$i" -> "$fullNewName""
+                mv "$i" "$fullNewName"
+            fi
+            if [ "$(echo "$pathPart" | grep "$j")" ]; then
+                # rename folder too
+                echo ""$pathPart" -> $(dirname "$pathPart")/"${myArray["$j"]}""
+                mv $pathPart $(dirname "$pathPart")/"${myArray["$j"]}"
+            fi
+        done
+    done
+
+    # Remove samples starting by "barcode", i.e. not renamed because not to added barcode
+    find "$basecalled" -type d -name "*barcode*" -exec rm -rf {} \;
+fi
 
 
 
@@ -234,6 +346,13 @@ python3 "${prog}"/nanoQC/nanoQC.py \
     -f "$basecalled" \
     -o "${qc}"/nanoQC/raw/fastq
 conda deactivate
+
+
+##############
+#
+# Read trimming
+#
+##############
 
 
 # Trim sequencing adapters
@@ -271,6 +390,13 @@ find "${basecalled}/pass" -type f -name "*.fastq.gz" ! -name "*unclassified*" \
                 'trim {}'
 
 
+##############
+#
+# Read filtering
+#
+##############
+
+
 # Filter out low quality reads
 function filter()
 {
@@ -279,6 +405,7 @@ function filter()
 
     filtlong \
         --keep_percent 95 \
+        --target_bases $(($size*100)) \
         "$1" \
         | pigz > "${filtered}"/"${sample}"_filtered.fastq.gz
 }
@@ -298,6 +425,7 @@ find "$trimmed" -type f -name "*_trimmed.fastq.gz" \
                 --jobs "$maxProc" \
                 'filter {}'
 
+
 # QC on filtered reads
 [ -d "${qc}"/nanoQC/raw/fastq ] || mkdir -p "${qc}"/nanoQC/raw/fastq
 conda activate nanoQC
@@ -307,7 +435,13 @@ python3 "${prog}"/nanoQC/nanoQC.py \
 conda deactivate
 
 
-# Assemble with Flye
+##############
+#
+# Assembly
+#
+##############
+
+
 function assemble_flye()
 {
     sample=$(basename "${1%_filtered.fastq.gz}")
@@ -320,6 +454,7 @@ function assemble_flye()
         --out-dir "${assemblies}"/"${ass}"/"$sample" \
         --genome-size "$size" \
         --iterations 3 \
+        --min-overlap "$reads_min_overlap" \
         --threads $((cpu/maxProc))
 
     # Rename assembly
@@ -344,17 +479,65 @@ function assemble_flye()
 
 export -f assemble_flye
 
+function assemble_shasta()
+{
+    sample=$(basename "${1%_filtered.fastq.gz}")
+
+    [ -d "${qc}"/assembly_graphs/"${ass}" ] || mkdir -p "${qc}"/assembly_graphs/"${ass}"
+    [ -d "${assemblies}"/"$ass" ] || mkdir -p "${assemblies}"/"$ass"
+
+    pigz -dk "$1"
+
+    shasta \
+        --input "${1%.gz}" \
+        --config Nanopore-Oct2021 \
+        --assemblyDirectory "${assemblies}"/"${ass}"/"$sample" \
+        --Reads.minReadLength "$reads_min_len" \
+        --threads $((cpu/maxProc))
+
+    shasta \
+        --command cleanupBinaryData \
+        --assemblyDirectory "${assemblies}"/"${ass}"/"$sample"
+
+    # Rename output files
+    mv "${assemblies}"/"${ass}"/"${sample}"/Assembly.fasta \
+        "${assemblies}"/"${ass}"/"${sample}"/"${sample}".fasta
+
+    mv "${assemblies}"/"${ass}"/"${sample}"/Assembly.gfa \
+        "${assemblies}"/"${ass}"/"${sample}"/"${sample}".gfa
+
+    # Display assembly graphs
+    Bandage image \
+        "${assemblies}"/"${ass}"/"${sample}"/"${sample}".gfa \
+        "${qc}"/assembly_graphs/"${ass}"/"${sample}".png
+
+    # Delete uncompress fastq
+    rm "${1%.gz}"
+}
+
+export -f assemble_shasta
+
+
 find -L "${filtered}" -type f -name "*.fastq.gz" \
     | parallel  --bar \
                 --env cpu \
                 --env maxProc \
-                --env assemble_flye \
+                --env assemble_${ass} \
                 --env ass \
                 --env assemblies \
                 --env size \
                 --env qc \
+                --env reads_min_len \
+                --env reads_min_overlap \
                 --jobs "$maxProc" \
-                "assemble_flye {}"
+                "assemble_${ass} {}"
+
+
+##############
+#
+# Polishing
+#
+##############
 
 
 # Polish with Medaka
@@ -362,7 +545,7 @@ function polish_medaka()
 {
     sample=$(basename "$1" ".fasta")
 
-    [ -d "${polished}"/"${ass}"/"$sample" ] || mkdir -p "${polished}"/"${ass}"/"$sample"
+    [ -d "${polished_medaka}"/"${ass}"/"$sample" ] || mkdir -p "${polished_medaka}"/"${ass}"/"$sample"
 
     # It is crucially important to specify the correct model (-m) according to the basecaller used.
     # Allowed values can be found by running "medaka tools list\_models"
@@ -383,17 +566,17 @@ function polish_medaka()
     medaka_consensus \
         -i "${filtered}"/"${sample}"_filtered.fastq.gz \
         -d "$1" \
-        -o "${polished}"/"${ass}"/"$sample" \
+        -o "${polished_medaka}"/"${ass}"/"$sample" \
         -t $((cpu/maxProc)) \
-        -m r941_min_sup_g507 \
-        2>&1 | tee "${polished}"/"${ass}"/"${sample}"/medaka.log
+        -m "$medaka_model" \
+        2>&1 | tee "${polished_medaka}"/"${ass}"/"${sample}"/medaka.log
 
     # Rename sample
-    mv "${polished}"/"${ass}"/"${sample}"/consensus.fasta \
-        "${polished}"/"${ass}"/"${sample}"/"${sample}"_medaka.fasta
+    mv "${polished_medaka}"/"${ass}"/"${sample}"/consensus.fasta \
+        "${polished_medaka}"/"${ass}"/"${sample}"/"${sample}"_medaka.fasta
 
     # Remove temporary files
-    find "${polished}"/"${ass}"/"${sample}" -type f \
+    find "${polished_medaka}"/"${ass}"/"${sample}" -type f \
         ! -name "*_medaka.fasta" \
         ! -name "*.gfa" \
         ! -name "*.log" \
@@ -401,10 +584,10 @@ function polish_medaka()
 
     # Reformat fasta
     python "${scripts}"/format_fasta.py \
-        "${polished}"/"${ass}"/"${sample}"/"${sample}"_medaka.fasta \
-        "${polished}"/"${ass}"/"${sample}"/"${sample}"_medaka.fasta1
-    mv "${polished}"/"${ass}"/"${sample}"/"${sample}"_medaka.fasta1 \
-        "${polished}"/"${ass}"/"${sample}"/"${sample}"_medaka.fasta
+        "${polished_medaka}"/"${ass}"/"${sample}"/"${sample}"_medaka.fasta \
+        "${polished_medaka}"/"${ass}"/"${sample}"/"${sample}"_medaka.fasta1
+    mv "${polished_medaka}"/"${ass}"/"${sample}"/"${sample}"_medaka.fasta1 \
+        "${polished_medaka}"/"${ass}"/"${sample}"/"${sample}"_medaka.fasta
 }
 
 export -f polish_medaka
@@ -414,7 +597,7 @@ conda activate medaka
 find "${assemblies}"/"$ass" -maxdepth 2 -type f -name "*.fasta" \
     | parallel  --bar \
                 --env polish_medaka \
-                --env polished \
+                --env polished_medaka \
                 --env scripts \
                 --env cpu \
                 --env ass \
@@ -426,18 +609,26 @@ conda deactivate
 
 
 
-
-
+##############
+#
 # Polish with short reads if available
-# TODO
+#  export maxProc=1
+#
+##############
 
 
+
+##############
+#
+# Orienting
+#
+##############
 
 
 # fixstart
 function fix_start()
 {
-    sample=$(basename "$1" "_medaka.fasta")
+    sample=$(basename "$1" ".fasta" | cut -d "_" -f 1)
 
     circlator fixstart \
         --verbose \
@@ -453,7 +644,7 @@ export -f fix_start
 [ -d "${baseDir}"/fixstart/"$ass" ] || mkdir -p "${baseDir}"/fixstart/"$ass"
 cd "${baseDir}"/fixstart/"$ass"
 
-find "${polished}"/"$ass" -type f -name "*.fasta" \
+find "${polished_medaka}"/"$ass" -type f -name "*.fasta" \
     | parallel  --bar \
                 --env fix_start \
                 --env maxProc \
@@ -463,8 +654,23 @@ find "${polished}"/"$ass" -type f -name "*.fasta" \
                 --jobs "$maxProc" \
                 "fix_start {}"
 
-# cleanup
+# Cleanup
 find "${baseDir}"/fixstart/"$ass" -type f ! -name "*.fasta" ! -name "*.log" -exec rm {} \;
+
+
+
+# If no orientation done (say not a bacterial genome)
+# [ -d "${baseDir}"/fixstart/"$ass" ] || mkdir -p "${baseDir}"/fixstart/"$ass"
+# find "${polished_medaka}"/"$ass"  -type f -name "*.fasta" \
+#     -exec sh -c 'ln -s {} "$baseDir"/fixstart/"$ass"/$(basename {} "_medaka.fasta").fasta' \;
+
+
+
+##############
+#
+# Assembly QC
+#
+##############
 
 
 # Quast
@@ -472,7 +678,7 @@ conda activate quast
 
 # Create list of all assemblies
 declare -a genomes=()
-for i in $(find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta"); do 
+for i in $(find -L "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta"); do 
     genomes+=("$i")
 done
 
@@ -501,7 +707,7 @@ function run_quast()
 # make function available to parallel
 export -f run_quast  # -f is to export functions
 
-find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" \
+find -L "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" \
     | parallel  --bar \
                 --env run_quast \
                 --env maxProc \
@@ -518,9 +724,9 @@ conda deactivate
 
 function get_coverage()  # unsing unmerged reads only
 {
-    # sample=$(basename "$1" | cut -d '_' -f 1)
+    # sample=$(basename "$1" ".fasta" | cut -d '_' -f 1)
     sample=$(basename "$1" ".fasta")
-    fastq_file="${filtered}"/"${sample}"_filtered.fastq.gz
+    fastq_file="${trimmed}"/"${sample}"_trimmed.fastq.gz
 
     [ -d "${qc}"/coverage/"${ass}"/"$sample" ] || mkdir -p "${qc}"/coverage/"${ass}"/"$sample"
 
@@ -549,7 +755,7 @@ export -f get_coverage
 [ -d "${qc}"/coverage/"${ass}" ] || mkdir -p "${qc}"/coverage/"${ass}"
 echo -e "Sample\tAverage_Cov" > "${qc}"/coverage/"${ass}"/average_cov.tsv
 
-find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" | \
+find -L "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" | \
     parallel    --bar \
                 --env get_coverage \
                 --env cpu \
@@ -623,7 +829,7 @@ echo -e "sample\ttop_taxonomy_name\tdistance\tpvalue\tmatching\tfull_taxonomy\tt
 
 [ -d "${qc}"/id ] || mkdir -p "${qc}"/id
 
-find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" \
+find -L "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" \
     | parallel    --bar \
                 --env id_sample \
                 --env qc \
@@ -632,29 +838,41 @@ find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" \
 conda deactivate
 
 
-# Annotate with PGAP
-# v2021-11-29.build5742
-# Create input yaml file
-[ -d "${annotation}"/pgap ] || mkdir -p "${annotation}"/pgap
+##############
+#
+# Annotation
+#
+##############
 
-function annotate_pgap()
-{
-    sample=$(basename "$1" ".fasta")
-    file_name=$(basename "$1")
 
-    input_dir=$(dirname "$1")
-    out_dir="${annotation}"/pgap/"$sample"
+conda activate prokka
 
-    input_yaml="${sample}"_inputs.yaml
-    metadata_yaml="${sample}"_metadata.yaml
 
-    cd "${annotation}"/pgap
+if ("$annotator" == 'pgap'); then
 
-    # 3 files (1 fasta and 2 yaml) need to be in same folder
-    cp "$1" "${annotation}"/pgap
+    # Annotate with PGAP
+    # v2021-11-29.build5742
+    # Create input yaml file
+    [ -d "${annotation}"/pgap ] || mkdir -p "${annotation}"/pgap
 
-    # Create yaml file for input files
-    echo -n "\
+    function annotate_pgap()
+    {
+        sample=$(basename "$1" ".fasta")
+        file_name=$(basename "$1")
+
+        input_dir=$(dirname "$1")
+        out_dir="${annotation}"/pgap/"$sample"
+
+        input_yaml="${sample}"_inputs.yaml
+        metadata_yaml="${sample}"_metadata.yaml
+
+        cd "${annotation}"/pgap
+
+        # 3 files (1 fasta and 2 yaml) need to be in same folder
+        cp "$1" "${annotation}"/pgap
+
+        # Create yaml file for input files
+        echo -n "\
 fasta: 
     class: File
     location: "$file_name"
@@ -671,81 +889,85 @@ organism:
 " > "$metadata_yaml"
 
     
-    # Run PGAP
-    python "${prog}"/pgap.py \
-        --no-self-update \
-        --report-usage-false \
-        --cpus "$cpu" \
-        --memory "${mem}"g \
-        --output "$out_dir" \
-        "$input_yaml"
+        # Run PGAP
+        python "${prog}"/pgap.py \
+            --no-self-update \
+            --report-usage-false \
+            --cpus "$cpu" \
+            --memory "${mem}"g \
+            --output "$out_dir" \
+            "$input_yaml"
 
-    # Cleanup?
-    # rm "${annotation}"/pgap/"$file_name"
-}
+        # Cleanup?
+        # rm "${annotation}"/pgap/"$file_name"
+    }
 
-export -f annotate_pgap
+    export -f annotate_pgap
 
-for i in $(find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" ); do
-    annotate_pgap "$i"
-done
+    for i in $(find -L "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" ); do
+        annotate_pgap "$i"
+    done
+else
+    # Annotate assemblies with Prokka
+    function annotate_prokka()
+    {
+        sample=$(basename "$1" ".fasta")
+
+        prokka  \
+            --outdir "${annotation}"/"${ass}"/"$sample" \
+            --force \
+            --prefix "$sample" \
+            --kingdom "$kingdom" \
+            --genus "$genus" \
+            --species "$species" \
+            --strain "$sample" \
+            --gram "$gram" \
+            --locustag "$locustag" \
+            --compliant \
+            --centre "$centre" \
+            --cpus $((cpu/maxProc)) \
+            --rfam \
+            "$1"
+
+        #extract hypothetical proteins
+        cat "${annotation}"/"${ass}"/"${sample}"/"${sample}".faa | \
+            awk '{if(substr($0,1,1)==">"){if (p){print "\n";} print $0} else printf("%s",$0);p++;}END{print "\n"}' | \
+            grep --no-group-separator -A 1 -F "hypothetical protein" \
+            > "${annotation}"/"${ass}"/"${sample}"/"${sample}"_hypoth.faa
+
+        echo -e ""$sample" hypothetical proteins (round1): $(cat "${annotation}"/"${ass}"/"${sample}"/"${sample}".faa | grep -ic "hypothetical")" \
+            | tee -a "${logs}"/log.txt
+    }
+
+    export -f annotate_prokka
+
+    find -L "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" | \
+        parallel    --bar \
+                    --env annotate_prokka \
+                    --env annotation \
+                    --env kingdom \
+                    --env genus \
+                    --env species \
+                    --env gram \
+                    --env locustag \
+                    --env centre \
+                    --env cpu \
+                    --env ass \
+                    --env maxProc \
+                    --env ass \
+                    --env scripts \
+                    --jobs "$maxProc" \
+                    "annotate_prokka {}"
+
+    conda deactivate
+fi
 
 
-# Annotate assemblies with Prokka
-conda activate prokka
-
-function annotate()
-{
-    sample=$(basename "$1" ".fasta")
-
-    prokka  \
-        --outdir "${annotation}"/"${ass}"/"$sample" \
-        --force \
-        --prefix "$sample" \
-        --kingdom "$kingdom" \
-        --genus "$genus" \
-        --species "$species" \
-        --strain "$sample" \
-        --gram "$gram" \
-        --locustag "$locustag" \
-        --compliant \
-        --centre "$centre" \
-        --cpus $((cpu/maxProc)) \
-        --rfam \
-        "$1"
-
-    #extract hypothetical proteins
-    cat "${annotation}"/"${ass}"/"${sample}"/"${sample}".faa | \
-        awk '{if(substr($0,1,1)==">"){if (p){print "\n";} print $0} else printf("%s",$0);p++;}END{print "\n"}' | \
-        grep --no-group-separator -A 1 -F "hypothetical protein" \
-        > "${annotation}"/"${ass}"/"${sample}"/"${sample}"_hypoth.faa
-
-    echo -e ""$sample" hypothetical proteins (round1): $(cat "${annotation}"/"${ass}"/"${sample}"/"${sample}".faa | grep -ic "hypothetical")" \
-        | tee -a "${logs}"/log.txt
-}
-
-export -f annotate
-
-find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" | \
-    parallel    --bar \
-                --env annotate \
-                --env annotation \
-                --env kingdom \
-                --env genus \
-                --env species \
-                --env gram \
-                --env locustag \
-                --env centre \
-                --env cpu \
-                --env ass \
-                --env maxProc \
-                --env ass \
-                --env scripts \
-                --jobs "$maxProc" \
-                "annotate {}"
-
-conda deactivate
-
+##############
+#
+# AMR
+#
+##############
 
 
 ### Resfinder
@@ -772,7 +994,7 @@ function run_resfinder ()
 
 export -f run_resfinder
 
-find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" | \
+find -L "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" | \
     parallel    --env run_resfinder \
                 --env resfinder_db \
                 --env ass \
@@ -826,7 +1048,7 @@ function run_rgi()
 
 export -f run_rgi
 
-find "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" \
+find -L "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" \
     | parallel    --bar \
                 --env run_rgi \
                 --env resfinder_db \
