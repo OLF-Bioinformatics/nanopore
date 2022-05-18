@@ -72,19 +72,20 @@ conda activate nanopore
 
 
 # Inputs
-export baseDir=/home/bioinfo/analyses/mbovis_nanopore/NPWGS_20211214_OA
-export data=/media/36tb/data/Mbovis/nanopore/NPWGS_20211214_OA
-bc_desc=/media/36tb/data/Mbovis/nanopore/NPWGS_20211214_OA/bc.txt  # Leave empty if not barcodes used
-samp=Test  # Only used to rename sample if no barcodes used
+export baseDir=/home/bioinfo/analyses/mbovis_nanopore/NP_20220419_AG
+export data=/media/36tb/data/Mbovis/nanopore/NP_20220419_AG
+bc_desc=/media/36tb/data/Mbovis/nanopore/NP_20220419_AG/bc.txt # Leave empty if not barcodes used
+samp=Multiplexed  # Only used to rename sample if no barcodes used
 
 # Guppy config file
-nano_config=dna_r9.4.1_450bps_sup.cfg  # dna_r9.4.1_450bps_sup.cfg; dna_r10.3_450bps_sup.cfg
+nano_config="dna_r10.4_e8.1_sup.cfg"  # dna_r9.4.1_450bps_sup.cfg; dna_r10.3_450bps_sup.cfg; dna_r10.4_e8.1_hac.cfg; dna_r10.4_e8.1_sup.cfg
+bc_kit="SQK-NBD112-24"  # "EXP-NBD104" (most common); "EXP-NBD103" (retired); "SQK-NBD112-24" (Q20+)
 
 # Medaka model file
-export medaka_model=r941_min_sup_g507  # r941_min_hac_g507; 
+export medaka_model=r103_sup_g507  # r941_min_sup_g507; r941_min_hac_g507; r10_min_high_g340; r103_sup_g507
 
 # Parallel execution
-export maxProc=4  # Set according to number of samples  in run and CPU available
+export maxProc=6  # Set according to number of samples  in run and CPU available
 
 # Sample info
 export size=4350000 # Pseudomonas syringae: 5630000, Mbovis: 4350000, Lmono: 2850000 # Salmonella: 4850000; Stagonospora: 37000000
@@ -97,7 +98,6 @@ export centre=OLF
 
 # Assembler [flye, shasta]
 export ass=flye  # shasta
-export reads_min_overlap=1000  # only for flye;
 export reads_min_len=1000  # only for shasta
 
 # Annotation [prokka, pgap]
@@ -255,14 +255,14 @@ else  # if barcodes
         --trim_adapters \
         --detect_barcodes \
         --trim_barcodes \
-        --barcode_kits "EXP-NBD104"
+        --barcode_kits "$bc_kit"
 
-    # Only hac available with this workflow for olf R10 flowcells
+    # Only hac available with this workflow for old R10 flowcells
     # guppy_basecaller \
     #     --input_path $data \
     #     --save_path $basecalled \
-    #     --flowcell "FLO-MIN106" \
-    #     --kit "SQK-LSK108" \
+    #     --flowcell "FLO-MIN110" \
+    #     --kit "SQK-LSK109" \
     #     --recursive \
     #     --device 'cuda:0' \
     #     --num_callers 4 \
@@ -276,7 +276,7 @@ else  # if barcodes
     #     --trim_adapters \
     #     --detect_barcodes \
     #     --trim_barcodes \
-    #     --barcode_kits "EXP-NBD103"
+    #     --barcode_kits "EXP-NBD104"
 
     # remove calibration strands, if presents
     [ -d "${basecalled}"/calibration_strands ] && rm -rf "${basecalled}"/calibration_strands
@@ -454,7 +454,6 @@ function assemble_flye()
         --out-dir "${assemblies}"/"${ass}"/"$sample" \
         --genome-size "$size" \
         --iterations 3 \
-        --min-overlap "$reads_min_overlap" \
         --threads $((cpu/maxProc))
 
     # Rename assembly
