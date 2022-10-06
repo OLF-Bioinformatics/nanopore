@@ -13,7 +13,7 @@ conda config --add channels r
 # Create all conda envrironments
 conda install mamba -n base -c conda-forge -y
 mamba install -n base -c conda-forge git -y
-mamba create -n nanopore -c bioconda filtlong porechop flye=2.9 pilon parallel bandage blast circlator -y
+mamba create -n nanopore -c bioconda filtlong porechop flye=2.9 pilon parallel bandage blast circlator fastp seqtk nedit -y
 mamba create -n qualimap -c bioconda qualimap parallel -y
 mamba create -n medaka -c conda-forge -c bioconda medaka parallel -y
 # mamba create -n medaka -c conda-forge -c bioconda parallel -y && conda activate medaka && pip install medaka
@@ -72,26 +72,26 @@ conda activate nanopore
 
 
 # Inputs
-export baseDir=/home/bioinfo/analyses/mbovis_nanopore/NP_20220419_AG
-export data=/media/36tb/data/Mbovis/nanopore/NP_20220419_AG
-bc_desc=/media/36tb/data/Mbovis/nanopore/NP_20220419_AG/bc.txt # Leave empty if not barcodes used
-samp=Multiplexed  # Only used to rename sample if no barcodes used
+export baseDir=/home/bioinfo/analyses/14_listeria_min
+export data=/media/36tb/data/Listeria/min_listeria/MinLin-14List-serotypes-2022-08-23
+bc_desc=/media/36tb/data/Listeria/min_listeria/MinLin-14List-serotypes-2022-08-23/bc.txt  # Leave empty if not barcodes used
+samp=  # Only used to rename sample if no barcodes used
 
 # Guppy config file
-nano_config="dna_r10.4_e8.1_sup.cfg"  # dna_r9.4.1_450bps_sup.cfg; dna_r10.3_450bps_sup.cfg; dna_r10.4_e8.1_hac.cfg; dna_r10.4_e8.1_sup.cfg
-bc_kit="SQK-NBD112-24"  # "EXP-NBD104" (most common); "EXP-NBD103" (retired); "SQK-NBD112-24" (Q20+)
+nano_config="dna_r9.4.1_450bps_sup.cfg"  # dna_r9.4.1_450bps_sup.cfg; dna_r10.3_450bps_sup.cfg; dna_r10.4_e8.1_hac.cfg; dna_r10.4_e8.1_sup.cfg
+bc_kit="EXP-NBD104 EXP-NBD114"  # "EXP-NBD104" (most common); "EXP-NBD103" (retired); "SQK-NBD112-24" (Q20+)
 
 # Medaka model file
-export medaka_model=r103_sup_g507  # r941_min_sup_g507; r941_min_hac_g507; r10_min_high_g340; r103_sup_g507
+export medaka_model=r941_min_sup_g507  # r941_min_sup_g507; r941_min_hac_g507; r10_min_high_g340; r103_sup_g507
 
 # Parallel execution
-export maxProc=6  # Set according to number of samples  in run and CPU available
+export maxProc=16  # Set according to number of samples  in run and CPU available
 
 # Sample info
-export size=4350000 # Pseudomonas syringae: 5630000, Mbovis: 4350000, Lmono: 2850000 # Salmonella: 4850000; Stagonospora: 37000000
+export size=2850000 # Pseudomonas syringae: 5630000, Mbovis: 4350000, Lmono: 2850000 # Salmonella: 4850000; Stagonospora: 37000000; Bacillus cereus: 6300000
 export kingdom=bacteria
-export genus=Mycobactrium  # Salmonella
-export species=bovis  # enterica
+export genus=Listeria  # Salmonella; Mycobacterium
+export species=monocytogenes  # enterica; tuberculosis variant bovis
 export gram=pos  # neg
 export locustag=XXX
 export centre=OLF
@@ -101,7 +101,7 @@ export ass=flye  # shasta
 export reads_min_len=1000  # only for shasta
 
 # Annotation [prokka, pgap]
-export annotator=prokka
+export annotator=pgap
 
 #################################   End of User defined variables   #################################
 
@@ -174,6 +174,17 @@ python "${prog}"/pgap.py --version | tee -a "${logs}"/log.txt
 # Basecalling
 #
 ##############
+
+
+# # Duplex basecalling for Q20+ only
+# pip install ont-guppy-duplex-pipeline
+
+# guppy_duplex \
+#     -i <input_folder_of_fast5_files> \
+#     -s <output_folder> \
+#     --call_non_duplex_reads \
+#     --do_read_splitting
+
 
 
 # Basecall and rename samples
@@ -254,7 +265,6 @@ else  # if barcodes
         --detect_adapter \
         --trim_adapters \
         --detect_barcodes \
-        --trim_barcodes \
         --barcode_kits "$bc_kit"
 
     # Only hac available with this workflow for old R10 flowcells
@@ -601,6 +611,7 @@ find "${assemblies}"/"$ass" -maxdepth 2 -type f -name "*.fasta" \
                 --env cpu \
                 --env ass \
                 --env maxProc \
+                --jobs "$maxProc" \
                 'polish_medaka {}'
 
 conda deactivate
@@ -773,19 +784,19 @@ function run_qualimap()
 {
     sample=$(basename "$1" ".bam")
     
-    [ -d "${qc}"/coverage/"${ass}"/qualimap/"$sample" ] || mkdir -p "${qc}"/coverage/"${ass}"/qualimap/"$sample"
+    [ -d "${qc}"/qualimap/"$sample" ] || mkdir -p "${qc}"/qualimap/"$sample"
 
     qualimap bamqc \
         --paint-chromosome-limits \
         -bam "$1" \
         --java-mem-size="${mem}"G \
         -nt $((cpu/maxProc)) \
-        -outdir "${qc}"/coverage/"${ass}"/qualimap/"$sample" \
+        -outdir "${qc}"/qualimap/"$sample" \
         -outfile "${sample}" \
         -outformat HTML
 
     # Remove bam files
-    rm -rf "${qc}"/coverage/"${ass}"/"$sample"
+    rm -rf "${qc}"/coverage
 }
 
 export -f run_qualimap
@@ -837,6 +848,16 @@ find -L "${baseDir}"/fixstart/"$ass" -type f -name "*.fasta" \
 conda deactivate
 
 
+# Gemome completeness
+python "${prog}"/genome_filter/genome_filter.py \
+    -i "${baseDir}"/fixstart/"$ass" \
+    -o "${qc}"/genome_filter \
+    -l "bacteria_odb10" \
+    -r "species" \
+    -n ""${genus}" "${species}""
+
+
+
 ##############
 #
 # Annotation
@@ -847,7 +868,7 @@ conda deactivate
 conda activate prokka
 
 
-if ("$annotator" == 'pgap'); then
+if (echo "$annotator" == 'pgap'); then
 
     # Annotate with PGAP
     # v2021-11-29.build5742
@@ -889,9 +910,14 @@ organism:
 
     
         # Run PGAP
+        # --no-self-update \
+        # --ignore-all-errors \
+        # --auto-correct-tax \
         python "${prog}"/pgap.py \
             --no-self-update \
             --report-usage-false \
+            --ignore-all-errors \
+            --auto-correct-tax \
             --cpus "$cpu" \
             --memory "${mem}"g \
             --output "$out_dir" \
