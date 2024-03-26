@@ -2,7 +2,7 @@
 
 
 # Activate conda environment
-conda activate nanopore
+conda activate shortreadpolish
 
 
 ###############
@@ -12,29 +12,9 @@ conda activate nanopore
 ###############
 
 
-# Install fastp
-mamba install -c bioconda fastp 
-
-
-# Install NextPolish
-sudo apt-get install python-dev libbz2-dev liblzma-dev
-mamba install -c bioconda seqtk -y
-cd $HOME/prog
-wget https://github.com/Nextomics/NextPolish/releases/download/v1.4.0/NextPolish.tgz
-tar zxvf NextPolish.tgz && rm NextPolish.tgz
-cd NextPolish && make -j
-
-
-# Install polypolish
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh  # Install rust
-cd $HOME/prog
-git clone https://github.com/rrwick/Polypolish.git
-cd Polypolish
-cargo build --release
-
-# Install ntEdit
-mamba install -c bioocnda ntedit -y
-
+# Install tools
+mamba install -c bioconda polypolish pypolca seqtk
+ 
 
 ###############
 #
@@ -112,103 +92,6 @@ parallel    --bar \
 ###############
 
 
-function run_nextpolish()
-{
-    genome="$1"
-    r1="$2"
-    r2="$3"
-    out="$4"
-
-    sample=$(basename "$r1" | cut -d "_" -f 1)
-
-
-    # Index genome for bwa
-    bwa index "$genome"
-
-    # Map reads
-    bwa mem -t $((cpu/maxProc)) "$genome" "$r1" "$r2" | \
-    samtools view -@ $((cpu/maxProc)) -F 0x4 -b - | \
-    samtools fixmate -@ $((cpu/maxProc)) -m - - | \
-    samtools sort -@ $((cpu/maxProc)) -m 4g - | \
-    samtools markdup -@ $((cpu/maxProc)) -r - "${out}"/"${sample}".bam
-
-    # Index bam file
-    samtools index -@ $((cpu/maxProc)) "${out}"/"${sample}".bam
-    
-    # Index genome for NextPolish
-    samtools faidx "$genome"
-
-    # Polish
-    python $HOME/prog/NextPolish/lib/nextpolish1.py \
-        --genome "$genome" \
-        --task 1 \
-        --process $((cpu/maxProc)) \
-        --bam_sgs "${out}"/"${sample}".bam \
-        -ploidy 1 \
-        > "${out}"/"${sample}".nextpolish.fasta
-
-    # Make uppercase and one line per sequence
-    seqtk seq "${out}"/"${sample}".nextpolish.fasta | \
-        awk '/^>/ {print($0)}; /^[^>]/ {print(toupper($0))}' \
-        > "${out}"/"${sample}".fasta
-
-    # Cleanup
-    rm "${genome}".amb \
-        "${genome}".ann \
-        "${genome}".bwt \
-        "${genome}".pac \
-        "${genome}".sa \
-        "${genome}".fai \
-        "${out}"/"${sample}".bam* \
-        "${out}"/"${sample}".nextpolish.fasta
-
-    # Update genome for next step
-    genome="${out}"/"${sample}".fasta
-}
-
-
-function run_ntedit()
-{
-    genome="$1"
-    r1="$2"
-    r2="$3"
-    out="$4"
-
-    sample=$(basename "$r1" | cut -d "_" -f 1)
-
-
-    # Polish
-    nthits \
-        -t $((cpu/maxProc)) \
-        -k 40 \
-        -p "${out}"/"${sample}" \
-        --outbloom \
-        --solid \
-        "$r1" "$r2"
-
-    ntedit \
-        -t $((cpu/maxProc)) \
-        -f "$genome" \
-        -b "${out}"/"${sample}" \
-        -r "${out}"/"${sample}"_k40.bf \
-        -m 1
-
-    # Make uppercase and one line per sequence.
-    seqtk seq "${out}"/"${sample}"_edited.fa | \
-        awk '/^>/ {print($0)}; /^[^>]/ {print(toupper($0))}' \
-        > "${out}"/"${sample}".fasta
-
-    # Cleanup
-    rm "${out}"/"${sample}"_variants.vcf \
-        "${out}"/"${sample}"_changes.tsv \
-        "${out}"/"${sample}"_k40.bf \
-        "${out}"/"${sample}"_edited.fa
-
-    # Update genome for next step
-    genome="${out}"/"${sample}".fasta
-}
-
-
 function run_polypolish()
 {
     genome="$1"
@@ -223,8 +106,8 @@ function run_polypolish()
     bwa index "$genome"
 
     # Map reads
-    bwa mem -t 64 -a "$genome" "$r1" > "${out}"/"${sample}"_R1.sam
-    bwa mem -t 64 -a "$genome" "$r2" > "${out}"/"${sample}"_R2.sam
+    bwa mem -t $((cpu/maxProc)) -a "$genome" "$r1" > "${out}"/"${sample}"_R1.sam
+    bwa mem -t $((cpu/maxProc)) -a "$genome" "$r2" > "${out}"/"${sample}"_R2.sam
 
     # Polish
     polypolish \
@@ -250,6 +133,38 @@ function run_polypolish()
     genome="${out}"/"${sample}".fasta
 }
 
+function run_pypolca()
+{
+    genome="$1"
+    r1="$2"
+    r2="$3"
+    out="$4"
+
+    sample=$(basename "$r1" | cut -d "_" -f 1)
+
+    # Polish
+    pypolca run \
+        -a "$genome" \
+        -1 "$r1" \
+        -2 "$r2" \
+        -t $((cpu/maxProc)) \
+        --output "${out}"/pypolca \
+        --force \
+        --prefix "${sample}" \
+        --careful 
+
+    # Make uppercase and one line per sequence.
+    seqtk seq "${out}"/pypolca/"${sample}"_corrected.fasta | \
+        awk '/^>/ {print($0)}; /^[^>]/ {print(toupper($0))}' \
+        > "${out}"/"${sample}".fasta
+
+    # Cleanup
+    rm -r "${out}"/pypolca/
+
+    # Update genome for next step
+    genome="${out}"/"${sample}".fasta
+}
+
 
 function rename_fasta_headers()
 {
@@ -266,29 +181,20 @@ function rename_fasta_headers()
 
 function polish()
 {
-    sample=$(basename "$1" | cut -d "_" -f 1)
-
     genome="$1"
+    sample=$(basename "$genome" | sed 's/\.fasta$//')
     r1="${trimmed_illumina}"/"${sample}"_trimmed_R1.fastq.gz
-    r2="${trimmed_illumina}"/"${sample}"_trimmed_R2.fastq.gz \
+    r2="${trimmed_illumina}"/"${sample}"_trimmed_R2.fastq.gz 
     out="$polished_illumina"
-
-
-    ### NextPolish ###
-    # 2 rounds
-    for i in {1..2}; do
-        run_nextpolish "$genome" "$r1" "$r2" "$out"
-    done
-
-    ### ntEdit ###
-    run_ntedit "$genome" "$r1" "$r2" "$out"
-    
 
     ### Polypolish ###
     # 3 rounds
     for i in {1..3}; do
         run_polypolish "$genome" "$r1" "$r2" "$out"
     done
+
+    ### pypolca ###
+    run_pypolca "$genome" "$r1" "$r2" "$out"
 
     # Fix header
     rename_fasta_headers "$genome"
@@ -301,18 +207,17 @@ function polish()
 function short_read_coverage()
 {
     genome="$1"
+    
     r1="${trimmed_illumina}"/"${sample}"_trimmed_R1.fastq.gz
-    r2="${trimmed_illumina}"/"${sample}"_trimmed_R2.fastq.gz \
+    r2="${trimmed_illumina}"/"${sample}"_trimmed_R2.fastq.gz 
     out="$polished_illumina"
-
-    sample=$(basename "$r1" | cut -d "_" -f 1)
 
     bwa index "$genome"
 
     bwa mem -t $((cpu/maxProc)) "$genome" "$r1" "$r2" | \
     samtools view -@ $((cpu/maxProc)) -F 0x4 -b - | \
     samtools fixmate -@ $((cpu/maxProc)) -m - - | \
-    samtools sort -@ $((cpu/maxProc)) -m 4g - | \
+    samtools sort -@ $((cpu/maxProc)) -m 2g - | \
     samtools markdup -@ $((cpu/maxProc)) -r - "${out}"/"${sample}".bam
 
     cov=$(samtools depth "${out}"/"${sample}".bam | awk '{sum+=$3} END {print sum/NR}')
@@ -326,8 +231,6 @@ function short_read_coverage()
         "${genome}".sa \
         "${out}"/"${sample}"*.bam
 }
-
-
 
 
 # Polish
